@@ -1,0 +1,6 @@
+-r requirements-core.txt
+# Real embeddings (downloads intfloat/multilingual-e5-small on first use, ~470 MB with torch)
+sentence-transformers>=3.0
+# LLM + web UI
+anthropic>=0.50
+gradio>=5.0
