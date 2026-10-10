@@ -33,22 +33,43 @@ What does not work yet: scanned PDFs (no OCR), very large corpora (> 300 pages),
 
 ```bash
 git clone https://github.com/DavutKursun/docs-chat && cd docs-chat
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env            # add your ANTHROPIC_API_KEY
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt   # Linux: add --extra-index-url https://download.pytorch.org/whl/cpu for the CPU-only torch wheel (skips the ~2 GB CUDA build)
+cp .env.example .env
+```
 
-python scripts/ingest.py eval/sample_docs --out index/     # downloads the embedding model on first run
+Pick the LLM in `.env`. Groq's free tier is the default; any other OpenAI-compatible endpoint (OpenRouter, Mistral, Gemini) works the same way:
+
+```ini
+LLM_PROVIDER=openai_compat
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_API_KEY=gsk_...
+LLM_MODEL=openai/gpt-oss-120b    # Groq retires model names: check https://console.groq.com/docs/models
+```
+
+Alternative, Claude via the Anthropic API:
+
+```ini
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+LLM_MODEL=claude-haiku-5-5       # or claude-sonnet-5-5
+```
+
+Then:
+
+```bash
+python scripts/ingest.py eval/sample_docs --out index/     # downloads multilingual-e5-small (~470 MB) once; ~10 s afterwards
 python scripts/ask.py --index index/ "What does error code E3 mean?"
 python app.py                                               # web UI (Milestone 3)
 ```
 
 Offline smoke test without downloading any model: `EMBEDDER=hash python scripts/ingest.py eval/sample_docs --out index/` (not semantic — for tests only).
 
-Tests: `pip install -r requirements-dev.txt && pytest` (no network, no API key).
+Tests: `pip install -r requirements-dev.txt && pytest` (no network, no API key, no SDK or torch needed).
 
 ## Stack
 
-Python · sentence-transformers (multilingual-e5-small) · FAISS · BM25 · Claude API (Haiku 5.5 / Sonnet 5.5) · Gradio · pytest · GitHub Actions
+Python · sentence-transformers (multilingual-e5-small) · FAISS · BM25 · any OpenAI-compatible LLM API (Groq, OpenRouter, Mistral, Gemini) or the Claude API · Gradio · pytest · GitHub Actions
 
 ## License
 

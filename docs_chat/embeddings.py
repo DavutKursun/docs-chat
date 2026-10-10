@@ -23,6 +23,10 @@ class Embedder(Protocol):
     name: str
     dim: int
 
+    def load(self) -> None:
+        """Load model weights now (a no-op for model-free embedders) so later calls are fast."""
+        ...
+
     def encode_passages(self, texts: list[str]) -> np.ndarray: ...
 
     def encode_queries(self, texts: list[str]) -> np.ndarray: ...
@@ -34,6 +38,9 @@ class HashEmbedder:
     def __init__(self, dim: int = 256) -> None:
         self.name = f"hash-{dim}"
         self.dim = dim
+
+    def load(self) -> None:
+        """Nothing to load."""
 
     def _encode(self, texts: list[str]) -> np.ndarray:
         out = np.zeros((len(texts), self.dim), dtype=np.float32)
@@ -52,8 +59,14 @@ class HashEmbedder:
         return self._encode(texts)
 
 
+def _embedding_dim(model) -> int:
+    """sentence-transformers 6 renamed get_sentence_embedding_dimension() to get_embedding_dimension()."""
+    get_dim = getattr(model, "get_embedding_dimension", None) or model.get_sentence_embedding_dimension
+    return int(get_dim())
+
+
 class E5Embedder:
-    """multilingual-e5 via sentence-transformers (lazy-loaded)."""
+    """multilingual-e5 via sentence-transformers (lazy-loaded; call ``load()`` to load eagerly)."""
 
     def __init__(self, model_name: str = "intfloat/multilingual-e5-small", batch_size: int = 32) -> None:
         self.name = model_name
@@ -61,12 +74,16 @@ class E5Embedder:
         self._model = None
         self.dim = 0
 
+    def load(self) -> None:
+        """Load the model now (otherwise it happens on the first encode, ~8 s for e5-small on CPU)."""
+        self._load()
+
     def _load(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer  # heavy import, on demand
 
             self._model = SentenceTransformer(self.name, device="cpu")
-            self.dim = int(self._model.get_sentence_embedding_dimension())
+            self.dim = _embedding_dim(self._model)
         return self._model
 
     def _encode(self, texts: list[str], prefix: str) -> np.ndarray:

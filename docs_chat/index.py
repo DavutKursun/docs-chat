@@ -8,6 +8,7 @@ The index is saved as three files in a directory: ``faiss.index``, ``chunks.json
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -19,6 +20,27 @@ from .chunking import Chunk
 from .embeddings import Embedder
 
 _TOKEN = re.compile(r"\w+", re.UNICODE)
+
+
+def _import_faiss():
+    """Import faiss so that it can share a process with torch.
+
+    faiss-cpu and torch each bundle their own OpenMP runtime (libomp). On macOS two things
+    go wrong when both are loaded: if faiss's copy is loaded first, torch segfaults later
+    (ask.py loads the index before the e5 embedder), so torch is imported first when it is
+    installed; and LLVM's libomp aborts at the first faiss search ("OMP: Error #15 ...
+    already initialized") unless KMP_DUPLICATE_LIB_OK is set, the same workaround
+    sentence-transformers applies on import. Both are no-ops without torch (hash embedder, CI).
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    import faiss
+
+    return faiss
 
 
 def tokenize(text: str) -> list[str]:
@@ -49,7 +71,7 @@ class Hit:
 
 class DocIndex:
     def __init__(self, chunks: list[Chunk], vectors: np.ndarray, embedder_name: str) -> None:
-        import faiss
+        faiss = _import_faiss()
         from rank_bm25 import BM25Plus
 
         if len(chunks) != vectors.shape[0]:
@@ -75,7 +97,7 @@ class DocIndex:
 
     # ------------------------------------------------------------- persistence
     def save(self, directory: str | Path) -> None:
-        import faiss
+        faiss = _import_faiss()
 
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
@@ -93,7 +115,7 @@ class DocIndex:
 
     @classmethod
     def load(cls, directory: str | Path) -> "DocIndex":
-        import faiss
+        faiss = _import_faiss()
 
         directory = Path(directory)
         meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))

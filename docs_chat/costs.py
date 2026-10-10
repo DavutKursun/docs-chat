@@ -3,6 +3,11 @@
 Prices are USD per million tokens (list prices checked on 2026-10-09; see
 https://platform.claude.com/docs/en/about-claude/pricing). Keep this table the single
 place where prices live, and re-check it before quoting numbers in the README.
+
+Only Anthropic models are priced. On an OpenAI-compatible provider a model that is not
+in the table is treated as a free tier: it costs $0.00 and ``format_cost`` shows
+"free tier" rather than "$0.0000", so nobody mistakes it for a measured cost. Add a
+row to ``PRICES_PER_MTOK`` (keyed by the provider's model id) to price a paid model.
 """
 
 from __future__ import annotations
@@ -22,14 +27,34 @@ PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
 CACHE_READ_FRACTION = {"claude-haiku-5-5": 0.10, "claude-sonnet-5-5": 0.05}  # of input price
 
 
-def cost_usd(model: str, input_tokens: int, output_tokens: int, cache_read_tokens: int = 0) -> float:
-    """Cost of one call. Unknown models raise so a typo cannot silently cost $0."""
+def cost_usd(
+    model: str, input_tokens: int, output_tokens: int, cache_read_tokens: int = 0, provider: str = "anthropic"
+) -> float:
+    """Cost of one call; ``input_tokens`` is the total prompt, ``cache_read_tokens`` its cached subset.
+
+    Unknown models raise so a typo cannot silently cost $0 — except on an OpenAI-compatible
+    provider, where an unpriced model is a free tier and costs 0.0 (see the module docstring).
+    """
     if model not in PRICES_PER_MTOK:
+        if provider == "openai_compat":
+            return 0.0
         raise KeyError(f"No price for model {model!r}; add it to PRICES_PER_MTOK")
     in_price, out_price = PRICES_PER_MTOK[model]
     cached = cache_read_tokens * in_price * CACHE_READ_FRACTION.get(model, 0.10)
     uncached = max(input_tokens - cache_read_tokens, 0) * in_price
     return (uncached + cached + output_tokens * out_price) / 1_000_000
+
+
+def format_cost(usd: float, estimated: bool = False) -> str:
+    """Cost for the UI/CLI: "$0.0004", "<$0.0001", "$0.0004 (est.)" or "free tier".
+
+    A cost of exactly zero only happens for unpriced free-tier models, so it is labelled
+    "free tier" instead of "$0.0000" to avoid looking like a measured cost.
+    """
+    if usd <= 0:
+        return "free tier"
+    text = "<$0.0001" if usd < 0.0001 else f"${usd:.4f}"
+    return f"{text} (est.)" if estimated else text
 
 
 @dataclass

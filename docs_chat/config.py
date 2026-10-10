@@ -11,7 +11,10 @@ from pathlib import Path
 
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
-    """Minimal .env loader (KEY=VALUE lines); never overrides real env vars."""
+    """Minimal .env loader: KEY=VALUE lines, optional quotes, inline ``# comments``.
+
+    Never overrides real environment variables.
+    """
     if not path.exists():
         return
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -19,7 +22,11 @@ def _load_dotenv(path: Path = Path(".env")) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip('"').strip("'")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        else:
+            value = value.split(" #", 1)[0].rstrip()
         os.environ.setdefault(key, value)
 
 
@@ -32,9 +39,18 @@ def _env(name: str, default: str) -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    # --- models -----------------------------------------------------------
-    llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "claude-haiku-5-5"))
-    llm_models_available: tuple[str, ...] = ("claude-haiku-5-5", "claude-sonnet-5-5")
+    # --- LLM provider -----------------------------------------------------
+    # "openai_compat": any OpenAI-compatible endpoint (Groq, OpenRouter, Mistral, Gemini's
+    # OpenAI endpoint, OpenAI) via the `openai` SDK; "anthropic": Claude via the `anthropic` SDK.
+    llm_provider: str = field(default_factory=lambda: _env("LLM_PROVIDER", "openai_compat"))
+    llm_base_url: str = field(default_factory=lambda: _env("LLM_BASE_URL", ""))
+    llm_api_key: str = field(default_factory=lambda: _env("LLM_API_KEY", ""))
+    anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY", ""))
+    # No universal default model for openai_compat (set LLM_MODEL); the anthropic provider
+    # falls back to claude-haiku-5-5 (see __post_init__).
+    llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", ""))
+    llm_models_available: tuple[str, ...] = ("claude-haiku-5-5", "claude-sonnet-5-5")  # anthropic dropdown (M3)
+    # --- embeddings -------------------------------------------------------
     embedder: str = field(default_factory=lambda: _env("EMBEDDER", "e5"))  # "e5" | "hash"
     e5_model_name: str = field(
         default_factory=lambda: _env("E5_MODEL_NAME", "intfloat/multilingual-e5-small")
@@ -63,6 +79,10 @@ class Settings:
     sample_docs_dir: Path = field(
         default_factory=lambda: Path(_env("SAMPLE_DOCS_DIR", "eval/sample_docs"))
     )
+
+    def __post_init__(self) -> None:
+        if not self.llm_model and self.llm_provider == "anthropic":
+            object.__setattr__(self, "llm_model", "claude-haiku-5-5")  # frozen dataclass
 
 
 settings = Settings()

@@ -108,3 +108,17 @@ def test_documents_summary(embedder: HashEmbedder):
         Chunk(chunk_id="b:1:0", doc_name="b", page_no=1, text="z " * 30, section_hint="z"),
     ]
     assert DocIndex.build(chunks, embedder).documents == {"a": 2, "b": 1}
+
+
+def test_import_faiss_works_with_and_without_torch(monkeypatch):
+    import importlib.util
+    import os
+    import sys
+
+    from docs_chat import index as index_module
+
+    assert index_module._import_faiss().__name__ == "faiss"
+    if importlib.util.find_spec("torch") is not None:  # the OpenMP workaround is only needed next to torch
+        assert os.environ.get("KMP_DUPLICATE_LIB_OK") == "TRUE"
+    monkeypatch.setitem(sys.modules, "torch", None)  # simulates "torch is not installed"
+    assert index_module._import_faiss().__name__ == "faiss"

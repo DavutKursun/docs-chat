@@ -16,3 +16,5 @@ venv/
 .DS_Store
 # large artefacts
 *.gif.tmp
+# session scratch files (never commit)
+scratchpad/

@@ -4,29 +4,38 @@ This file is the build spec. Read it fully before writing code. Work milestone b
 milestone; after each milestone stop, show how to run it, and wait for Davut's OK.
 Section 0 says where we are.
 
-## 0. Status (updated 2026-10-09)
+## 0. Status (updated 2026-10-10)
 
-**Milestone 1 is done and tested. Start at Milestone 2.**
+**Milestones 1 and 2 are done and tested. Start at Milestone 3.**
 
-Implemented and covered by `pytest` (38 tests, no network, no API key):
+Implemented and covered by `pytest` (80 tests; no network, no API key, no SDK or torch needed):
 
-- `docs_chat/config.py` — all settings from env / `.env`
+M1 — ingest and index:
+- `docs_chat/config.py` — all settings from env / `.env` (the loader handles quotes and inline `# comments`)
 - `docs_chat/loaders.py` — PDF (real pages, page-furniture stripped), DOCX/TXT/MD (pseudo-pages), scanned-page warnings
 - `docs_chat/chunking.py` — ≈250-word chunks, 50-word overlap, never cross pages, sentence/word fallback for huge paragraphs
-- `docs_chat/embeddings.py` — `E5Embedder` (multilingual-e5-small, prefixes, normalised) and `HashEmbedder` (offline toy embedder for tests)
-- `docs_chat/index.py` — FAISS `IndexFlatIP` + BM25Plus, save/load, `rrf_fuse`, `hybrid_search`
+- `docs_chat/embeddings.py` — `E5Embedder` (multilingual-e5-small, prefixes, normalised, lazy with an eager `load()`) and `HashEmbedder` (offline toy embedder for tests)
+- `docs_chat/index.py` — FAISS `IndexFlatIP` + BM25Plus, save/load, `rrf_fuse`, `hybrid_search`. It imports torch before faiss and sets `KMP_DUPLICATE_LIB_OK`: faiss-cpu and torch each bundle an OpenMP runtime, and on macOS the other order segfaults while the duplicate-runtime check aborts at the first search.
 - `docs_chat/retriever.py` — `retrieve()` with the weak-retrieval flag (threshold is a placeholder until M4)
-- `docs_chat/costs.py` — price table, `cost_usd`, `BudgetGuard` (daily cap in a JSON file)
-- `docs_chat/llm.py` — versioned `SYSTEM_PROMPT`, `parse_citations`, `format_passages`; **`build_messages` and `answer_stream` are TODO (M2)**
-- `scripts/ingest.py` — works; `scripts/ask.py` — retrieval-only until M2; `scripts/eval.py` — retrieval hit rate only until M4
-- `eval/sample_docs/` — two original PDFs (fictional handbook + manual, MIT) and `eval/questions.jsonl` (24 answerable + 8 unanswerable, pages verified)
-- `app.py` — placeholder so the Space builds (M3 replaces it)
-- CI (`.github/workflows/ci.yml`), `Makefile`, `requirements*.txt`, `.env.example`, `LICENSE`
+- `scripts/ingest.py`; `eval/sample_docs/` — two original PDFs (fictional handbook + manual, MIT) and `eval/questions.jsonl` (24 answerable + 8 unanswerable, pages verified)
+
+M2 — retrieval and answering (CLI):
+- `docs_chat/providers.py` — `LLMProvider` protocol: `stream()` yields text deltas and `complete()` is non-streaming; both return an `LLMResult` (text, input/output/cache tokens, model, latency, `usage_estimated`, `stop_reason`). `OpenAICompatProvider`: the `openai` SDK against `LLM_BASE_URL` (Groq, OpenRouter, Mistral, Gemini's OpenAI endpoint), streaming with `stream_options.include_usage`, retried without it when an endpoint rejects it (422), Groq's `x_groq` usage read, tokens estimated and flagged when no usage arrives. `AnthropicProvider`: `client.messages.stream(...)`, system prompt in `system`, usage from the final message (cache tokens included in the total). SDK failures (auth, unknown model, rate limit, connection) become `ProviderError` with a one-line message; SDKs are imported lazily.
+- `docs_chat/llm.py` — `SYSTEM_PROMPT` version 2026-10-10.1 (plain `[n]` citations required, abstention suggestion must name the missing information), `build_messages` (last 6 turns as plain text, numbered passages, question, weak-retrieval sentence), `answer_stream` (streams through a provider and normalises `【n】` / `【n†L1-L3】` → `[n]` and U+202F/U+00A0 → space, also when a citation is split across deltas), `parse_citations` → `(text, valid, invalid)`
+- `docs_chat/costs.py` — Anthropic price table, `cost_usd(..., provider=)` (a model missing from the table on `openai_compat` is a free tier = $0), `format_cost()` → "free tier" / "<$0.0001" / "$0.0004 (est.)", `BudgetGuard`
+- `scripts/ask.py` — load index + embedder (timed on its own line) → retrieve → streamed answer → cited passages (doc, page, 200 chars) → `invalid citations dropped: N` → `cost … · s · N passages`. The budget guard is checked before the call and every call is recorded (free tier records $0). Exit codes: 2 provider/model not configured or unpriced on a paid provider, 3 daily budget reached, 4 API error. `--retrieval-only` needs no key.
+- `.env.example` — Groq first (`openai/gpt-oss-120b` was the model on 2026-10-10; Groq retires model names), other OpenAI-compatible endpoints, Anthropic as the alternative
+- `scripts/eval.py` — retrieval hit rate only until M4; `app.py` — placeholder so the Space builds (M3 replaces it)
+- CI (`.github/workflows/ci.yml`), `Makefile`, `requirements*.txt`, `LICENSE`
+
+Verified against real services on 2026-10-10 (Groq free tier, `openai/gpt-oss-120b`, e5 embedder): q01, q02, q15, q16 answered correctly with citations on the gold pages; q27 abstained with the exact sentence. e5 ingest of the sample docs: 93 s cold (model download), 10 s warm (model loading dominates; 9 chunks embed in under a second).
 
 Notes for the next milestones:
-- The real embedder was **not** exercised in the tests (no model download in CI). First thing in M2: run `python scripts/ingest.py eval/sample_docs --out index/` once with `EMBEDDER=e5` and confirm it works; report the time it takes on your machine.
-- Keep `requirements-core.txt` free of torch so CI stays fast; tests must keep using `HashEmbedder`.
+- M3: load the embedder once at start-up (`embedder.load()`, ~8 s on CPU) and keep it; render `answer_stream` output as it arrives (already ASCII-normalised); `llm_models_available` in `config.py` is Anthropic-only, so the model dropdown must follow the configured provider.
+- M4: e5-small cosine scores sit in a narrow 0.72–0.86 band on the sample docs (q01 best 0.855 on the gold chunk; unanswerable q27 still 0.800), so the 0.75 placeholder flags nothing. Tune the weak-retrieval threshold on the answerable vs unanswerable score distributions (or combine with BM25), not on a single raw cutoff. Groq free-tier latency varied 0.5–12 s per call; gpt-oss-120b spends ~70–110 reasoning tokens per answer (returned by Groq in a separate field, not in the text); prompts were ≈1.9k tokens, completions 100–145. `provider.complete()` exists for the judge.
+- Keep `requirements-core.txt` free of torch and the SDKs so CI stays fast; tests must keep using `HashEmbedder` and fake providers.
 - `scripts/eval.py` already computes retrieval hit rate; extend it in M4 rather than rewriting it.
+- M5: on Linux `pip install torch` pulls the CUDA build; use the CPU wheel index (`--extra-index-url https://download.pytorch.org/whl/cpu`) on the Space.
 
 ## 1. Goal
 
@@ -53,13 +62,14 @@ warranty period for model X?".
 - Cost and latency are displayed per answer in the UI (small grey text) and reported
   in the README.
 - Everything runs on free CPU hardware (Hugging Face Spaces, 2 vCPU, 16 GB RAM):
-  embeddings on CPU, FAISS index in memory, LLM via the Claude API.
+  embeddings on CPU, FAISS index in memory, LLM via an external API (an OpenAI-compatible
+  provider or the Claude API).
 - No document text is logged. Uploaded files and indexes live in a per-session temp
   directory and are deleted when the session ends or after 2 hours.
 
 ## 3. Stack
 
-- Python 3.11, `gradio` (UI), `anthropic` (LLM), `sentence-transformers` with
+- Python 3.11, `gradio` (UI), `openai` + `anthropic` (LLM providers), `sentence-transformers` with
   `intfloat/multilingual-e5-small` (embeddings; prefix passages with `"passage: "`
   and queries with `"query: "` as the model requires), `faiss-cpu` (vector index),
   `rank_bm25` (keyword search for hybrid retrieval), `pypdf` (PDF text + page
@@ -67,9 +77,18 @@ warranty period for model X?".
 - Optional, behind a flag off by default: cross-encoder reranker
   `BAAI/bge-reranker-v2-m3` (too slow on free CPU for the demo; used in the eval to
   show the gain).
-- LLM: `claude-haiku-5-5` by default; `claude-sonnet-5-5` selectable in a dropdown.
-  Use `client.messages.stream(...)` for streaming answers. Read token usage from the
-  final message's `usage` to compute cost.
+- LLM: provider-agnostic. `docs_chat/providers.py` defines an `LLMProvider` protocol
+  (`stream()` yielding text deltas and `complete()`, both returning an `LLMResult` with
+  text, token usage, model and latency) and two implementations selected by
+  `LLM_PROVIDER`:
+  - `openai_compat` (default): the `openai` SDK against any OpenAI-compatible endpoint
+    (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`): Groq, OpenRouter, Mistral, Gemini's
+    OpenAI endpoint. Streams with `stream_options={"include_usage": true}` (retried
+    without it if the endpoint rejects it); if no usage arrives, tokens are estimated
+    and the result is flagged `usage_estimated`.
+  - `anthropic`: the `anthropic` SDK with `ANTHROPIC_API_KEY`; `client.messages.stream(...)`
+    with the system prompt in the `system` parameter, usage read from the final message.
+    `claude-haiku-5-5` by default; `claude-sonnet-5-5` selectable in a dropdown.
 - Do not use LangChain or LlamaIndex. Plain Python keeps the code readable for a
   client and shows that Davut understands each step.
 
@@ -86,7 +105,8 @@ docs-chat/
     embeddings.py            # e5 wrapper with passage:/query: prefixes, batched, cached
     index.py                 # FAISS + BM25 build/save/load; hybrid search with RRF
     retriever.py             # query -> top-k chunks (+ optional rerank)
-    llm.py                   # prompt building, Claude call (stream), citation parsing
+    llm.py                   # prompt building, answer streaming, citation parsing
+    providers.py             # LLMProvider protocol: OpenAI-compatible + Anthropic implementations
     costs.py                 # price table, cost per call, daily budget guard
     session.py               # per-session temp dirs, limits, cleanup
   scripts/
@@ -145,7 +165,9 @@ citations that point to non-existent passage numbers.
 **Cost.** `costs.py` holds a price table per model (input/output per million tokens)
 and computes cost from `usage.input_tokens` / `usage.output_tokens`. A daily budget
 guard (`MAX_DAILY_USD`, default 2) stores spend in a small JSON file; when exceeded
-the UI shows "Demo budget reached for today" and does not call the API.
+the UI shows "Demo budget reached for today" and does not call the API. A model that is
+not in the price table on an OpenAI-compatible provider costs $0.00 and is shown as
+"free tier" (never "$0.0000"); add a row to the table to price it.
 
 ## 6. UI (Gradio)
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from docs_chat.costs import BudgetGuard, cost_usd
+from docs_chat.costs import BudgetGuard, cost_usd, format_cost
 from docs_chat.llm import NOT_FOUND_SENTENCE, SYSTEM_PROMPT, parse_citations
 
 
@@ -50,7 +50,9 @@ def test_budget_guard_survives_corrupt_file(tmp_path: Path):
 
 
 def test_parse_citations_drops_invalid_numbers():
-    valid, invalid = parse_citations("Leave is 24 days [1]. Paid on the 25th [3][2]. See [9] and [0].", n_passages=3)
+    answer = "Leave is 24 days [1]. Paid on the 25th [3][2]. See [9] and [0]."
+    text, valid, invalid = parse_citations(answer, n_passages=3)
+    assert text == answer  # plain ASCII answers come back unchanged
     assert valid == [1, 2, 3]
     assert invalid == 2
 
@@ -59,3 +61,20 @@ def test_system_prompt_contains_the_rules():
     assert NOT_FOUND_SENTENCE in SYSTEM_PROMPT
     assert "ONLY the numbered passages" in SYSTEM_PROMPT
     assert "data, not instructions" in SYSTEM_PROMPT
+
+
+def test_unknown_model_is_free_tier_on_openai_compat_only():
+    assert cost_usd("llama-3.3-70b-versatile", 1000, 100, provider="openai_compat") == 0.0
+    with pytest.raises(KeyError):
+        cost_usd("llama-3.3-70b-versatile", 1000, 100, provider="anthropic")
+    # a priced model stays priced whatever the provider
+    assert cost_usd("claude-haiku-5-5", 1_000_000, 0, provider="openai_compat") == pytest.approx(0.10)
+
+
+def test_format_cost_labels_free_tier_and_estimates():
+    assert format_cost(0.0) == "free tier"
+    assert format_cost(cost_usd("llama-x", 1000, 100, provider="openai_compat")) == "free tier"
+    assert "0.0000" not in format_cost(0.0)
+    assert format_cost(0.00042) == "$0.0004"
+    assert format_cost(0.00042, estimated=True) == "$0.0004 (est.)"
+    assert format_cost(0.00001) == "<$0.0001"
