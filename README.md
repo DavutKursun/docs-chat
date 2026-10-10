@@ -55,13 +55,25 @@ ANTHROPIC_API_KEY=sk-ant-...
 LLM_MODEL=claude-haiku-5-5       # or claude-sonnet-5-5
 ```
 
-Then:
+Then, from the command line:
 
 ```bash
 python scripts/ingest.py eval/sample_docs --out index/     # downloads multilingual-e5-small (~470 MB) once; ~10 s afterwards
 python scripts/ask.py --index index/ "What does error code E3 mean?"
-python app.py                                               # web UI (Milestone 3)
 ```
+
+Or the web UI:
+
+```bash
+python app.py                     # loads the embedder (~10 s), then serves http://127.0.0.1:7860
+```
+
+Click **Try the sample documents**, or upload your own PDF/DOCX/TXT/MD files and click **Build index**, then
+ask. Each answer streams in with `[n]` citations, a collapsible **Sources** list (document, page, passage) and a
+grey `cost · latency · passages` line. **Clear session** deletes your files and index; otherwise they are
+deleted after 2 hours.
+
+<!-- M5: ![docs-chat UI](assets/screenshot.png) -->
 
 Offline smoke test without downloading any model: `EMBEDDER=hash python scripts/ingest.py eval/sample_docs --out index/` (not semantic — for tests only).
 

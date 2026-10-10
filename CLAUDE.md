@@ -6,9 +6,10 @@ Section 0 says where we are.
 
 ## 0. Status (updated 2026-10-10)
 
-**Milestones 1 and 2 are done and tested. Start at Milestone 3.**
+**Milestones 1, 2 and 3 are done and tested. Start at Milestone 4.**
 
-Implemented and covered by `pytest` (80 tests; no network, no API key, no SDK or torch needed):
+Implemented and covered by `pytest` (113 tests; no network, no API key; the 4 UI tests are skipped where
+Gradio is not installed, everything else needs neither an SDK nor torch):
 
 M1 — ingest and index:
 - `docs_chat/config.py` — all settings from env / `.env` (the loader handles quotes and inline `# comments`)
@@ -25,17 +26,44 @@ M2 — retrieval and answering (CLI):
 - `docs_chat/costs.py` — Anthropic price table, `cost_usd(..., provider=)` (a model missing from the table on `openai_compat` is a free tier = $0), `format_cost()` → "free tier" / "<$0.0001" / "$0.0004 (est.)", `BudgetGuard`
 - `scripts/ask.py` — load index + embedder (timed on its own line) → retrieve → streamed answer → cited passages (doc, page, 200 chars) → `invalid citations dropped: N` → `cost … · s · N passages`. The budget guard is checked before the call and every call is recorded (free tier records $0). Exit codes: 2 provider/model not configured or unpriced on a paid provider, 3 daily budget reached, 4 API error. `--retrieval-only` needs no key.
 - `.env.example` — Groq first (`openai/gpt-oss-120b` was the model on 2026-10-10; Groq retires model names), other OpenAI-compatible endpoints, Anthropic as the alternative
-- `scripts/eval.py` — retrieval hit rate only until M4; `app.py` — placeholder so the Space builds (M3 replaces it)
+- `scripts/eval.py` — retrieval hit rate only until M4
 - CI (`.github/workflows/ci.yml`), `Makefile`, `requirements*.txt`, `LICENSE`
+
+M3 — web app:
+- `docs_chat/session.py` — `Session` (uploads/ + index/ per visitor, question count, loaded index) and
+  `SessionStore` (create/get/clear/cleanup; TTL from creation time plus an orphan sweep by mtime; cleanup runs on
+  every `create()` and on a 10-minute timer in the app). The limits `max_files`, `max_file_mb`, `max_total_pages`
+  and `max_questions_per_session` raise `LimitExceeded` (a `ValueError`) with user-readable messages; unsupported
+  file types are rejected before copying. Logs carry only session ids, counts, sizes and timings.
+- `docs_chat/service.py` — the glue the UI and the CLI share: `shared_embedder()` (loaded once per process),
+  `build_index(session, files, progress_cb)` (replaces earlier uploads; progress per stage and per embedding
+  batch), `ask()` (generator yielding text deltas, returning an `AnswerRecord`: text, citations, sources, cost
+  string, latency, weak flag, …), `preflight()` (model configured, priced, budget) and `BudgetExceeded`.
+- `app.py` — Gradio 6 Blocks UI as in §6: left column upload / Build index (`gr.Progress`) / documents table /
+  model dropdown (the configured provider's model first; Claude models only when `ANTHROPIC_API_KEY` is set) /
+  Clear session; right column chatbot streaming via `service.ask`, under each answer a collapsible `<details>`
+  Sources block, a grey "cost · latency · N passages" line and a weak-retrieval note; header with "Try the
+  sample documents". Session id in `gr.State`; every error becomes a `gr.Warning`. Two rendering details:
+  passage text in the Sources block is collapsed to one line (a blank line inside an HTML block ends it in
+  Markdown and breaks the box), and the assistant bubble shows a "…" placeholder while the model reasons
+  before its first token. API endpoints: `build_index`, `build_sample`, `ask`, `clear`.
+- Checked manually in a browser on 2026-10-10 (sample docs, answers with sources, abstention, own PDF upload,
+  clear session). Measured through the Gradio client on Groq's free tier: sample index 0.5–0.9 s, first token
+  0.2–1.4 s, answers 1.2–2.3 s; the embedder loads in ~9 s at start-up.
 
 Verified against real services on 2026-10-10 (Groq free tier, `openai/gpt-oss-120b`, e5 embedder): q01, q02, q15, q16 answered correctly with citations on the gold pages; q27 abstained with the exact sentence. e5 ingest of the sample docs: 93 s cold (model download), 10 s warm (model loading dominates; 9 chunks embed in under a second).
 
 Notes for the next milestones:
-- M3: load the embedder once at start-up (`embedder.load()`, ~8 s on CPU) and keep it; render `answer_stream` output as it arrives (already ASCII-normalised); `llm_models_available` in `config.py` is Anthropic-only, so the model dropdown must follow the configured provider.
+- M4: build the eval on `service`/`provider.complete()` so it runs the same path as the app; the judge needs a
+  second provider/model.
 - M4: e5-small cosine scores sit in a narrow 0.72–0.86 band on the sample docs (q01 best 0.855 on the gold chunk; unanswerable q27 still 0.800), so the 0.75 placeholder flags nothing. Tune the weak-retrieval threshold on the answerable vs unanswerable score distributions (or combine with BM25), not on a single raw cutoff. Groq free-tier latency varied 0.5–12 s per call; gpt-oss-120b spends ~70–110 reasoning tokens per answer (returned by Groq in a separate field, not in the text); prompts were ≈1.9k tokens, completions 100–145. `provider.complete()` exists for the judge.
-- Keep `requirements-core.txt` free of torch and the SDKs so CI stays fast; tests must keep using `HashEmbedder` and fake providers.
+- Keep `requirements-core.txt` free of torch, the SDKs and Gradio so CI stays fast; tests must keep using
+  `HashEmbedder` and fake providers, and UI tests skip without Gradio.
 - `scripts/eval.py` already computes retrieval hit rate; extend it in M4 rather than rewriting it.
 - M5: on Linux `pip install torch` pulls the CUDA build; use the CPU wheel index (`--extra-index-url https://download.pytorch.org/whl/cpu`) on the Space.
+  Set `HF_HUB_OFFLINE=1` once the model is cached: sentence-transformers makes ~10 hub requests when loading
+  it (about 5 s of the 9 s start-up) and would fail without network. Gradio takes the next free port when 7860
+  is busy; Spaces set `GRADIO_SERVER_NAME` themselves. The README has placeholders for the GIF and a screenshot.
 
 ## 1. Goal
 
