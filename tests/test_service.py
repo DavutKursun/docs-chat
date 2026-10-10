@@ -30,20 +30,26 @@ class FakeProvider:
     def __init__(self, text: str = ANSWER, error: Exception | None = None, after: int = 0):
         self.text, self.error, self.after, self.calls = text, error, after, []
 
-    def stream(self, messages, system, model, max_tokens):
+    def _result(self, messages, system, model, max_tokens) -> LLMResult:
         self.calls.append({"messages": list(messages), "system": system, "model": model, "max_tokens": max_tokens})
-        pieces = re.split(r"(?<= )", self.text)
-        if self.error is not None:
-            yield from pieces[: self.after]
-            raise self.error
-        yield from pieces
         return LLMResult(
             text=self.text, input_tokens=1500, output_tokens=40, cache_read_tokens=0,
             model=model, elapsed_seconds=0.02, usage_estimated=False, stop_reason="stop",
         )
 
+    def stream(self, messages, system, model, max_tokens):
+        result = self._result(messages, system, model, max_tokens)
+        pieces = re.split(r"(?<= )", self.text)
+        if self.error is not None:
+            yield from pieces[: self.after]
+            raise self.error
+        yield from pieces
+        return result
+
     def complete(self, messages, system, model, max_tokens):
-        raise NotImplementedError
+        if self.error is not None:
+            raise self.error
+        return self._result(messages, system, model, max_tokens)
 
 
 def drain(gen):
@@ -227,3 +233,17 @@ def test_shared_embedder_is_created_once_per_process():
         assert service.shared_embedder(make_settings(embedder="e5")) is first  # the first call's settings win
     finally:
         service.reset_shared_embedder()
+
+
+def test_answer_is_the_non_streaming_twin_of_ask(indexed_session, embedder):
+    provider = FakeProvider()
+    record = service.answer(indexed_session.index, QUESTION, [], "llama-x", provider, embedder=embedder,
+                            cfg=make_settings(), mode="dense")
+    assert record.text.startswith("Error code E3") and record.citations == [1] and record.invalid_citations == 1
+    assert record.n_passages == len(record.passages) == 6 and record.sources[0] == record.passages[0]
+    assert all(p.n == i for i, p in enumerate(record.passages, start=1))
+    assert (record.input_tokens, record.output_tokens) == (1500, 40) and record.cost == "free tier"
+    assert record.weak_retrieval is True  # hash scores are far below the threshold
+    assert indexed_session.question_count == 0  # no session involvement
+    with pytest.raises(ValueError, match="retrieval mode"):
+        service.answer(indexed_session.index, QUESTION, [], "m", FakeProvider(), embedder=embedder, mode="bogus")

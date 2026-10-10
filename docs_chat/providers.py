@@ -37,6 +37,10 @@ PROVIDER_NAMES = ("openai_compat", "anthropic")
 class ProviderError(RuntimeError):
     """An API call failed (auth, unknown model, rate limit, connection…); ``str(exc)`` is user-readable."""
 
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code  # HTTP status when known (429 = rate limited), else None
+
 
 @dataclass(frozen=True)
 class LLMResult:
@@ -149,13 +153,13 @@ class OpenAICompatProvider:
         try:
             return (yield from self._stream(messages, system, model, max_tokens))
         except self._api_errors as exc:
-            raise ProviderError(describe_api_error(exc)) from exc
+            raise ProviderError(describe_api_error(exc), _get(exc, "status_code")) from exc
 
     def complete(self, messages: Sequence[Message], system: str, model: str, max_tokens: int) -> LLMResult:
         try:
             return self._complete(messages, system, model, max_tokens)
         except self._api_errors as exc:
-            raise ProviderError(describe_api_error(exc)) from exc
+            raise ProviderError(describe_api_error(exc), _get(exc, "status_code")) from exc
 
     def _stream(
         self, messages: Sequence[Message], system: str, model: str, max_tokens: int
@@ -261,13 +265,13 @@ class AnthropicProvider:
         try:
             return (yield from self._stream(messages, system, model, max_tokens))
         except self._api_errors as exc:
-            raise ProviderError(describe_api_error(exc)) from exc
+            raise ProviderError(describe_api_error(exc), _get(exc, "status_code")) from exc
 
     def complete(self, messages: Sequence[Message], system: str, model: str, max_tokens: int) -> LLMResult:
         try:
             return self._complete(messages, system, model, max_tokens)
         except self._api_errors as exc:
-            raise ProviderError(describe_api_error(exc)) from exc
+            raise ProviderError(describe_api_error(exc), _get(exc, "status_code")) from exc
 
     def _stream(
         self, messages: Sequence[Message], system: str, model: str, max_tokens: int

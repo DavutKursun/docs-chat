@@ -173,6 +173,13 @@ class DocIndex:
             hits.append(Hit(self.chunks[idx], score, dense_scores.get(idx), sparse_scores.get(idx)))
         return hits
 
+    def dense_only(self, query: str, embedder: Embedder, k: int = 6) -> list[Hit]:
+        """Top-k chunks by dense similarity alone (the "dense only" evaluation configuration)."""
+        if not self.chunks:
+            return []
+        qv = embedder.encode_queries([query])[0]
+        return [Hit(self.chunks[idx], score, score, None) for idx, score in self.dense_search(qv, k)]
+
     # ------------------------------------------------------------------- stats
     @property
     def documents(self) -> dict[str, int]:

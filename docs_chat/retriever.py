@@ -30,11 +30,21 @@ class RetrievalResult:
     best_dense_score: float | None
 
 
-def retrieve(index: DocIndex, query: str, embedder: Embedder, settings: Settings) -> RetrievalResult:
-    """Hybrid retrieval + weak-retrieval flag. (Reranker: TODO in M2/M4.)"""
-    hits = index.hybrid_search(
-        query, embedder, k=settings.top_k, candidates=settings.candidates, rrf_k=settings.rrf_k
-    )
+RETRIEVAL_MODES = ("hybrid", "dense")
+
+
+def retrieve(
+    index: DocIndex, query: str, embedder: Embedder, settings: Settings, mode: str = "hybrid"
+) -> RetrievalResult:
+    """Top-k chunks (hybrid RRF by default, or dense only for the eval) + the weak-retrieval flag."""
+    if mode == "hybrid":
+        hits = index.hybrid_search(
+            query, embedder, k=settings.top_k, candidates=settings.candidates, rrf_k=settings.rrf_k
+        )
+    elif mode == "dense":
+        hits = index.dense_only(query, embedder, k=settings.top_k)
+    else:
+        raise ValueError(f"Unknown retrieval mode {mode!r}; expected one of {RETRIEVAL_MODES}")
     dense_scores = [h.dense_score for h in hits if h.dense_score is not None]
     best = max(dense_scores) if dense_scores else None
     weak = best is None or best < settings.weak_retrieval_threshold

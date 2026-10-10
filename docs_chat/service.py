@@ -1,4 +1,4 @@
-"""The glue between the UI (or the CLI) and the pipeline — no Gradio in here.
+"""The glue between the UI (or the CLI and the eval) and the pipeline — no Gradio in here.
 
 * ``shared_embedder()`` loads the embedding model once per process and shares it; the app
   calls it at start-up (~8 s for e5-small on CPU) so no request pays for the load.
@@ -10,10 +10,13 @@
   latency, weak-retrieval flag). It checks the configuration and the daily budget first,
   counts the question against the session limit, records the cost afterwards, and logs
   only counts, tokens and timings — never the question or the answer.
+* ``answer(index, question, history, model, provider)`` is the non-streaming twin for scripts
+  and the evaluation: same retrieval, prompt, parsing and pricing, but no session, no question
+  limit and no budget guard (the caller accounts for the cost).
 
 Errors callers should expect: ``ValueError`` (including ``LimitExceeded``) for configuration
 and input problems, ``BudgetExceeded`` when the daily cap is reached, ``ProviderError`` when
-the API call fails. ``scripts/ask.py`` and ``app.py`` both go through this module.
+the API call fails. ``scripts/ask.py``, ``scripts/eval.py`` and ``app.py`` all go through here.
 """
 
 from __future__ import annotations
@@ -22,16 +25,17 @@ import logging
 import threading
 import time
 from collections.abc import Generator, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Settings
 from .config import settings as default_settings
 from .costs import BudgetGuard, cost_usd, format_cost
 from .embeddings import Embedder, get_embedder
-from .llm import answer_stream, build_messages, parse_citations
-from .providers import LLMProvider
-from .retriever import retrieve
+from .index import DocIndex, Hit
+from .llm import MAX_TOKENS, SYSTEM_PROMPT, answer_stream, build_messages, parse_citations
+from .providers import LLMProvider, LLMResult
+from .retriever import RetrievalResult, retrieve
 from .session import BuildReport, ProgressCallback, Session, report_progress
 
 log = logging.getLogger(__name__)
@@ -87,7 +91,7 @@ def build_index(
 # ---------------------------------------------------------------------------- answers
 @dataclass(frozen=True)
 class Source:
-    """A cited passage, for the UI's "Sources" list."""
+    """A retrieved passage, numbered as in the prompt; the cited ones are shown as "Sources"."""
 
     n: int  # the [n] in the answer
     doc_name: str
@@ -105,7 +109,7 @@ class AnswerRecord:
     text: str  # normalised answer (ASCII [n] citations, plain spaces)
     citations: list[int]  # passage numbers cited that exist
     invalid_citations: int  # citations to non-existent passages, dropped
-    sources: list[Source]
+    sources: list[Source]  # the cited passages
     cost: str  # "free tier", "$0.0004", "$0.0004 (est.)"
     cost_usd: float
     latency_seconds: float  # retrieval + answer, model already loaded
@@ -114,6 +118,9 @@ class AnswerRecord:
     n_passages: int
     model: str
     truncated: bool  # the answer hit the max_tokens limit
+    passages: list[Source] = field(default_factory=list)  # every retrieved passage in rank order (eval: hit@k)
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 def budget_guard(cfg: Settings = default_settings) -> BudgetGuard:
@@ -134,6 +141,37 @@ def preflight(model: str, provider: LLMProvider, guard: BudgetGuard) -> None:
             f"Demo budget reached for today: ${spend.usd:.4f} spent in {spend.calls} call(s), "
             f"cap ${guard.max_daily_usd:.2f}. Not calling the API."
         )
+
+
+def _source(n: int, hit: Hit) -> Source:
+    return Source(n, hit.chunk.doc_name, hit.chunk.page_no, hit.chunk.is_pseudo_page, hit.chunk.text)
+
+
+def _record(
+    result: LLMResult, retrieval: RetrievalResult, model: str, provider: LLMProvider, latency: float
+) -> AnswerRecord:
+    """Price the call and turn the LLM result + retrieval into an AnswerRecord (shared by ask() and answer())."""
+    hits = retrieval.hits
+    usd = cost_usd(model, result.input_tokens, result.output_tokens, result.cache_read_tokens, provider=provider.name)
+    text, cited, invalid = parse_citations(result.text, len(hits))
+    passages = [_source(n, hit) for n, hit in enumerate(hits, start=1)]
+    return AnswerRecord(
+        text=text,
+        citations=cited,
+        invalid_citations=invalid,
+        sources=[passages[n - 1] for n in cited],
+        cost=format_cost(usd, estimated=result.usage_estimated),
+        cost_usd=usd,
+        latency_seconds=latency,
+        weak_retrieval=retrieval.weak,
+        best_dense_score=retrieval.best_dense_score,
+        n_passages=len(hits),
+        model=result.model,
+        truncated=result.stop_reason in ("length", "max_tokens"),
+        passages=passages,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+    )
 
 
 def ask(
@@ -165,37 +203,44 @@ def ask(
 
     t0 = time.perf_counter()
     retrieval = retrieve(session.index, question, embedder, cfg)
-    hits = retrieval.hits
-    messages = build_messages(history, hits, question, weak_retrieval=retrieval.weak)
+    messages = build_messages(history, retrieval.hits, question, weak_retrieval=retrieval.weak)
     session.next_question()  # LimitExceeded once max_questions_per_session is reached
     result = yield from answer_stream(provider, messages, model)
     latency = time.perf_counter() - t0
 
-    usd = cost_usd(model, result.input_tokens, result.output_tokens, result.cache_read_tokens, provider=provider.name)
-    guard.record(usd)  # free-tier calls record $0 but still count
-    text, cited, invalid = parse_citations(result.text, len(hits))
-    sources = [
-        Source(n, hit.chunk.doc_name, hit.chunk.page_no, hit.chunk.is_pseudo_page, hit.chunk.text)
-        for n in cited
-        for hit in [hits[n - 1]]
-    ]
-    cost = format_cost(usd, estimated=result.usage_estimated)
+    record = _record(result, retrieval, model, provider, latency)
+    guard.record(record.cost_usd)  # free-tier calls record $0 but still count
     log.info(
         "answer: %d passages, %d in / %d out tokens%s, %.1f s, cost %s, %d source(s), %d invalid citation(s)%s",
-        len(hits), result.input_tokens, result.output_tokens, " (estimated)" if result.usage_estimated else "",
-        latency, cost, len(sources), invalid, ", weak retrieval" if retrieval.weak else "",
+        record.n_passages, record.input_tokens, record.output_tokens,
+        " (estimated)" if result.usage_estimated else "", latency, record.cost, len(record.sources),
+        record.invalid_citations, ", weak retrieval" if retrieval.weak else "",
     )
-    return AnswerRecord(
-        text=text,
-        citations=cited,
-        invalid_citations=invalid,
-        sources=sources,
-        cost=cost,
-        cost_usd=usd,
-        latency_seconds=latency,
-        weak_retrieval=retrieval.weak,
-        best_dense_score=retrieval.best_dense_score,
-        n_passages=len(hits),
-        model=result.model,
-        truncated=result.stop_reason in ("length", "max_tokens"),
-    )
+    return record
+
+
+def answer(
+    index: DocIndex,
+    question: str,
+    history: Sequence[tuple[str, str]],
+    model: str,
+    provider: LLMProvider,
+    *,
+    embedder: Embedder,
+    cfg: Settings = default_settings,
+    mode: str = "hybrid",
+    max_tokens: int = MAX_TOKENS,
+) -> AnswerRecord:
+    """Non-streaming answer for scripts and the evaluation (``mode`` = "hybrid" or "dense").
+
+    Same retrieval, prompt, citation parsing and pricing as ``ask()``, without a session, question
+    limit or budget guard; the caller is responsible for accounting the cost.
+    """
+    question = question.strip()
+    if not question:
+        raise ValueError("Please type a question.")
+    t0 = time.perf_counter()
+    retrieval = retrieve(index, question, embedder, cfg, mode=mode)
+    messages = build_messages(history, retrieval.hits, question, weak_retrieval=retrieval.weak)
+    result = provider.complete(messages, SYSTEM_PROMPT, model, max_tokens)
+    return _record(result, retrieval, model, provider, time.perf_counter() - t0)
