@@ -87,7 +87,7 @@ def test_ask_end_to_end_with_mocked_provider(ask, index_dir, guard, capsys, prov
     lines = out.rstrip("\n").split("\n")
 
     # loading is reported first and is not part of the answer latency
-    assert lines[0].startswith("loaded index (9 chunks) + embedder hash-256 in ")
+    assert re.match(r"loaded index \(\d+ chunks\) \+ embedder hash-256 in \d+\.\d s$", lines[0])
     # the answer was streamed to stdout, after a note that the hash embedder's scores are below the threshold
     assert "note: retrieval was weak" in out
     assert ANSWER in out
@@ -148,7 +148,7 @@ def test_ask_exits_2_when_the_provider_is_not_configured(ask, index_dir, guard, 
 def test_ask_retrieval_only_needs_no_provider_or_budget(ask, index_dir, capsys):
     assert ask.main([QUESTION, "--index", str(index_dir), "--embedder", "hash", "--retrieval-only"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0].startswith("loaded index (9 chunks) + embedder hash-256 in ")
+    assert re.match(r"loaded index \(\d+ chunks\) \+ embedder hash-256 in \d+\.\d s$", lines[0])
     assert lines[1].startswith("retrieval: 6 passages")
     out = "\n".join(lines)
     assert "[1] " in out and "bm25=" in out

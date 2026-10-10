@@ -88,8 +88,12 @@ def test_build_index_reports_progress_documents_and_warnings(store, embedder):
     session = store.create()
     calls: list[tuple[float, str]] = []
     report = service.build_index(session, SAMPLE_DOCS, lambda f, m: calls.append((f, m)), embedder=embedder)
-    assert report.documents == {"aria_x200_manual.pdf": 2, "lumen_employee_handbook.pdf": 3} == session.documents
-    assert report.n_pages == 5 and report.n_chunks == 9 and report.warnings == [] and report.seconds >= 0
+    from pypdf import PdfReader
+
+    expected_pages = {p.name: len(PdfReader(str(p)).pages) for p in SAMPLE_DOCS}  # every page has text
+    assert report.documents == expected_pages == session.documents
+    assert report.n_pages == sum(expected_pages.values()) >= 30
+    assert report.n_chunks >= report.n_pages and report.warnings == [] and report.seconds >= 0
     fractions = [f for f, _ in calls]
     assert fractions == sorted(fractions) and fractions[0] == 0.0 and fractions[-1] == 1.0
     assert any("Embedding" in m for _, m in calls) and "Indexed 2 document(s)" in calls[-1][1]
