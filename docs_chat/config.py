@@ -79,6 +79,7 @@ class Settings:
     sample_docs_dir: Path = field(
         default_factory=lambda: Path(_env("SAMPLE_DOCS_DIR", "eval/sample_docs"))
     )
+    sessions_dir: Path = field(default_factory=lambda: Path(_env("SESSIONS_DIR", "sessions")))  # per-session uploads + index
 
     def __post_init__(self) -> None:
         if not self.llm_model and self.llm_provider == "anthropic":

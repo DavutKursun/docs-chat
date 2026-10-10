@@ -122,3 +122,10 @@ def test_import_faiss_works_with_and_without_torch(monkeypatch):
         assert os.environ.get("KMP_DUPLICATE_LIB_OK") == "TRUE"
     monkeypatch.setitem(sys.modules, "torch", None)  # simulates "torch is not installed"
     assert index_module._import_faiss().__name__ == "faiss"
+
+
+def test_build_reports_embedding_progress_per_batch(embedder):
+    chunks = [Chunk(chunk_id=f"d:1:{i}", doc_name="d", page_no=1, text=f"text {i}", section_hint="t") for i in range(5)]
+    calls = []
+    index = DocIndex.build(chunks, embedder, batch_size=2, progress_cb=lambda done, total: calls.append((done, total)))
+    assert calls == [(2, 5), (4, 5), (5, 5)] and len(index) == 5

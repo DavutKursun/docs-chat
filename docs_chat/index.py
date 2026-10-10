@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -86,12 +87,21 @@ class DocIndex:
 
     # ------------------------------------------------------------------ build
     @classmethod
-    def build(cls, chunks: list[Chunk], embedder: Embedder, batch_size: int = 64) -> "DocIndex":
+    def build(
+        cls,
+        chunks: list[Chunk],
+        embedder: Embedder,
+        batch_size: int = 64,
+        progress_cb: Callable[[int, int], None] | None = None,
+    ) -> "DocIndex":
+        """Embed the chunks in batches; ``progress_cb(done, total)`` is called after each batch."""
         if not chunks:
             return cls([], np.zeros((0, max(embedder.dim, 1)), dtype=np.float32), embedder.name)
         parts = []
         for i in range(0, len(chunks), batch_size):
             parts.append(embedder.encode_passages([c.text for c in chunks[i : i + batch_size]]))
+            if progress_cb is not None:
+                progress_cb(min(i + batch_size, len(chunks)), len(chunks))
         vectors = np.vstack(parts).astype(np.float32)
         return cls(chunks, vectors, embedder.name)
 

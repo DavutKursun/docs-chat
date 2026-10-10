@@ -3,9 +3,10 @@
 
     python scripts/ask.py --index index/ "How many vacation days do new employees get?"
 
-Flow: load index + embedder (reported on its own line, not part of the answer latency) →
-hybrid retrieval → prompt → answer streamed to the terminal → the cited passages (doc, page,
-first 200 characters) → "cost $0.0004 · 2.1 s · 6 passages".
+Loads the index and the embedder (reported on its own line, not part of the answer latency),
+then goes through ``docs_chat.service`` — the same code path as the web app: hybrid
+retrieval → prompt → answer streamed to the terminal → the cited passages (doc, page, first
+200 characters) → "cost $0.0004 · 2.1 s · 6 passages".
 
 The daily budget guard (MAX_DAILY_USD, BUDGET_FILE) is checked before the call and every
 call is recorded afterwards (free-tier calls record $0 but still count as calls).
@@ -21,17 +22,19 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections.abc import Generator
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from docs_chat import service  # noqa: E402
 from docs_chat.config import settings  # noqa: E402
-from docs_chat.costs import BudgetGuard, cost_usd, format_cost  # noqa: E402
-from docs_chat.embeddings import get_embedder  # noqa: E402
+from docs_chat.costs import BudgetGuard  # noqa: E402
 from docs_chat.index import DocIndex, Hit  # noqa: E402
-from docs_chat.llm import answer_stream, build_messages, parse_citations  # noqa: E402
-from docs_chat.providers import LLMProvider, LLMResult, Message, ProviderError, get_provider  # noqa: E402
+from docs_chat.providers import LLMProvider, ProviderError, get_provider  # noqa: E402
 from docs_chat.retriever import retrieve  # noqa: E402
+from docs_chat.session import Session  # noqa: E402
 
 EXIT_OK, EXIT_NOT_CONFIGURED, EXIT_BUDGET, EXIT_API_ERROR = 0, 2, 3, 4
 PREVIEW_CHARS = 200
@@ -52,14 +55,13 @@ def print_retrieval(hits: list[Hit], weak: bool, best: float | None, seconds: fl
         print("    " + preview(c.text))
 
 
-def stream_answer(provider: LLMProvider, messages: list[Message], model: str) -> LLMResult:
-    """Print the answer as it streams; return the provider's result (text, usage, timing)."""
-    gen = answer_stream(provider, messages, model)
+def stream_answer(answer: Generator[str, None, service.AnswerRecord]) -> service.AnswerRecord:
+    """Print the answer as it streams; return the record (text, sources, cost, latency)."""
     printed = False
     try:
         while True:
             try:
-                delta = next(gen)
+                delta = next(answer)
             except StopIteration as stop:
                 return stop.value
             print(delta, end="", flush=True)
@@ -69,14 +71,12 @@ def stream_answer(provider: LLMProvider, messages: list[Message], model: str) ->
             print(flush=True)
 
 
-def print_sources(hits: list[Hit], cited: list[int], invalid: int) -> None:
+def print_sources(record: service.AnswerRecord) -> None:
     print()
-    print("Sources:" if cited else "Sources: none cited")
-    for n in cited:
-        c = hits[n - 1].chunk
-        where = f"section {c.page_no}" if c.is_pseudo_page else f"p.{c.page_no}"
-        print(f"  [{n}] {c.doc_name} {where}: {preview(c.text)}")
-    print(f"invalid citations dropped: {invalid}")
+    print("Sources:" if record.sources else "Sources: none cited")
+    for source in record.sources:
+        print(f"  [{source.n}] {source.doc_name} {source.where}: {preview(source.text)}")
+    print(f"invalid citations dropped: {record.invalid_citations}")
 
 
 def main(argv: list[str] | None = None, *, provider: LLMProvider | None = None, guard: BudgetGuard | None = None) -> int:
@@ -88,6 +88,7 @@ def main(argv: list[str] | None = None, *, provider: LLMProvider | None = None, 
     parser.add_argument("--model", default=settings.llm_model, help="LLM model id (default: LLM_MODEL)")
     parser.add_argument("--retrieval-only", action="store_true", help="skip the LLM; print the retrieved passages")
     args = parser.parse_args(argv)
+    cfg = replace(settings, embedder=args.embedder)
 
     if not args.retrieval_only:
         # fail fast on configuration and budget, before loading the index and the embedding model
@@ -97,58 +98,51 @@ def main(argv: list[str] | None = None, *, provider: LLMProvider | None = None, 
             except ValueError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return EXIT_NOT_CONFIGURED
-        if not args.model:
-            print("error: No LLM model configured: set LLM_MODEL in .env (see .env.example)", file=sys.stderr)
-            return EXIT_NOT_CONFIGURED
+        guard = guard or service.budget_guard(settings)
         try:
-            cost_usd(args.model, 0, 0, provider=provider.name)  # a paid provider needs a price for the model
-        except KeyError as exc:
-            print(f"error: {exc.args[0]}", file=sys.stderr)
-            return EXIT_NOT_CONFIGURED
-        guard = guard or BudgetGuard(settings.budget_file, settings.max_daily_usd)
-        if not guard.can_spend():
-            spend = guard.read()
-            print(
-                f"Demo budget reached for today: ${spend.usd:.4f} spent in {spend.calls} call(s), "
-                f"cap ${guard.max_daily_usd:.2f}. Not calling the API.",
-                file=sys.stderr,
-            )
+            service.preflight(args.model, provider, guard)
+        except service.BudgetExceeded as exc:
+            print(exc, file=sys.stderr)
             return EXIT_BUDGET
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_NOT_CONFIGURED
 
     t_load = time.perf_counter()
     index = DocIndex.load(args.index)
-    embedder = get_embedder(args.embedder, settings.e5_model_name)
+    embedder = service.shared_embedder(cfg)
     if embedder.name != index.embedder_name:
         print(f"warning: index was built with {index.embedder_name}, querying with {embedder.name}", file=sys.stderr)
-    embedder.load()  # load the model now, so the seconds below are answer latency only
     print(f"loaded index ({len(index)} chunks) + embedder {embedder.name} in {time.perf_counter() - t_load:.1f} s")
 
-    t0 = time.perf_counter()
-    result = retrieve(index, args.question, embedder, settings)
-    hits = result.hits
     if args.retrieval_only:
-        print_retrieval(hits, result.weak, result.best_dense_score, time.perf_counter() - t0)
+        t0 = time.perf_counter()
+        result = retrieve(index, args.question, embedder, cfg)
+        print_retrieval(result.hits, result.weak, result.best_dense_score, time.perf_counter() - t0)
         return EXIT_OK
 
-    if result.weak:
-        best = None if result.best_dense_score is None else round(result.best_dense_score, 3)
-        print(f"note: retrieval was weak (best dense score {best}); the answer may not be in the documents.")
-    messages = build_messages([], hits, args.question, weak_retrieval=result.weak)
+    session = Session(id="cli", path=args.index, created_at=time.time(), settings=cfg, index=index)
     try:
-        llm = stream_answer(provider, messages, args.model)
+        record = stream_answer(
+            service.ask(session, args.question, [], args.model, provider, guard=guard, embedder=embedder)
+        )
+    except service.BudgetExceeded as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_BUDGET
     except ProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_API_ERROR
-    seconds = time.perf_counter() - t0
+    except ValueError as exc:  # not configured, or a session limit
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_NOT_CONFIGURED
 
-    usd = cost_usd(args.model, llm.input_tokens, llm.output_tokens, llm.cache_read_tokens, provider=provider.name)
-    guard.record(usd)  # free-tier calls record $0 but still count as calls
-
-    _, cited, invalid = parse_citations(llm.text, len(hits))  # llm.text is already normalised by answer_stream
-    print_sources(hits, cited, invalid)
-    if llm.stop_reason in ("length", "max_tokens"):
+    if record.weak_retrieval:
+        best = None if record.best_dense_score is None else round(record.best_dense_score, 3)
+        print(f"note: retrieval was weak (best dense score {best}); the answer may not be in the documents.")
+    print_sources(record)
+    if record.truncated:
         print("note: the answer was cut off by the max_tokens limit", file=sys.stderr)
-    print(f"cost {format_cost(usd, estimated=llm.usage_estimated)} · {seconds:.1f} s · {len(hits)} passages")
+    print(f"cost {record.cost} · {record.latency_seconds:.1f} s · {record.n_passages} passages")
     return EXIT_OK
 
 
