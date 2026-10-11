@@ -3,7 +3,7 @@
 Rules (see CLAUDE.md §5):
 * chunks never cross a page boundary;
 * a chunk holds roughly ``chunk_words`` words (word count is a cheap proxy for tokens;
-  250 words ≈ 350 tokens for English);
+  350 words ≈ 500 tokens for English; tuned on the eval set in M4);
 * consecutive chunks of the same page overlap by ``overlap_words`` words so that a
   sentence cut at a boundary is still retrievable;
 * paragraphs are kept together when they fit; an oversized paragraph is split at
@@ -67,7 +67,7 @@ def _tail_words(text: str, n: int) -> str:
     return " ".join(words[-n:]) if n > 0 else ""
 
 
-def chunk_page(page: Page, chunk_words: int = 250, overlap_words: int = 50) -> list[Chunk]:
+def chunk_page(page: Page, chunk_words: int = 350, overlap_words: int = 50) -> list[Chunk]:
     """Chunk one page. Empty pages produce no chunks."""
     if chunk_words <= 0:
         raise ValueError("chunk_words must be positive")
@@ -112,7 +112,7 @@ def chunk_page(page: Page, chunk_words: int = 250, overlap_words: int = 50) -> l
     return chunks
 
 
-def chunk_pages(pages: list[Page], chunk_words: int = 250, overlap_words: int = 50) -> list[Chunk]:
+def chunk_pages(pages: list[Page], chunk_words: int = 350, overlap_words: int = 50) -> list[Chunk]:
     chunks: list[Chunk] = []
     for page in pages:
         chunks.extend(chunk_page(page, chunk_words=chunk_words, overlap_words=overlap_words))

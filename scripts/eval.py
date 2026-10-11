@@ -39,6 +39,7 @@ from docs_chat.evaluation import (  # noqa: E402
     abstained,
     call_with_retry,
     hit_at_k,
+    is_quota_exhausted,
     judge_messages,
     markdown_report,
     parse_judge,
@@ -80,6 +81,7 @@ def evaluate_question(q: dict, index: DocIndex, embedder, cfg, *, mode, model, p
         hit3=hit_at_k(passages, q["doc"], q.get("page"), 3),
         hit6=hit_at_k(passages, q["doc"], q.get("page"), 6),
         best_dense_score=record.best_dense_score,
+        best_bm25_score=record.best_bm25_score,
         weak=record.weak_retrieval,
         answer=record.text,
         citations=record.citations,
@@ -173,46 +175,56 @@ def main(argv: list[str] | None = None) -> int:
         for w in warnings:
             print(f"warning: {w}", file=sys.stderr)
         index = DocIndex.build(chunk_pages(pages, cfg.chunk_words, cfg.chunk_overlap_words), embedder)
-    print(f"index: {len(index)} chunks, embedder {embedder.name}, ready in {time.perf_counter() - t0:.1f} s")
+    print(f"index: {len(index)} chunks, embedder {embedder.name}, ready in {time.perf_counter() - t0:.1f} s", flush=True)
 
     name = args.name or f"{args.retrieval}-{slug(model)}" + ("-dryrun" if args.dry_run else "")
     sleep = (lambda s: None) if args.dry_run else time.sleep
     pause = (lambda: sleep(delay)) if delay else (lambda: None)
     print(f"config {name}: {len(questions)} questions, retrieval={args.retrieval}, model={model} via {provider_name}, "
-          f"judge={judge_model} via {judge_provider_name}, delay={delay}s")
+          f"judge={judge_model} via {judge_provider_name}, delay={delay}s", flush=True)
 
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = args.out_dir / f"{name}.jsonl"
+    jsonl_path.write_text("", encoding="utf-8")  # rows are appended as they come, so an interrupted run keeps them
     rows: list[dict] = []
+    stopped = None
     for i, q in enumerate(questions, start=1):
         row = evaluate_question(
             q, index, embedder, cfg, mode=args.retrieval, model=model, provider=provider, judge_model=judge_model,
             judge_provider=judge_provider, retries=args.retries, sleep=sleep, pause=pause,
         )
         rows.append(row)
+        with jsonl_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         if row.get("error"):
             status = f"ERROR {row['error'][:70]}"
         elif q["answerable"]:
             status = f"hit@6={'✓' if row['hit6'] else '✗'} verdict={row['verdict']}"
         else:
             status = f"abstained={'✓' if row['abstained'] else '✗'}"
-        print(f"[{i:2d}/{len(questions)}] {q['id']} {status}")
+        print(f"[{i:2d}/{len(questions)}] {q['id']} {status}", flush=True)
+        if row.get("error") and is_quota_exhausted(ProviderError(row["error"], 429)):
+            stopped = f"stopped after {i} question(s): the provider's daily quota is exhausted ({row['error'][:120]})"
+            print(stopped, flush=True)
+            break
 
     summary = summarize(rows)
     config = {
         "name": name, "generated_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "retrieval": args.retrieval, "model": model, "provider": provider_name, "judge_model": judge_model,
         "judge_provider": judge_provider_name, "embedder": embedder.name, "top_k": cfg.top_k,
-        "chunk_words": cfg.chunk_words, "weak_retrieval_threshold": cfg.weak_retrieval_threshold,
+        "chunk_words": cfg.chunk_words, "chunk_overlap_words": cfg.chunk_overlap_words,
+        "weak_retrieval_threshold": cfg.weak_retrieval_threshold, "weak_bm25_threshold": cfg.weak_bm25_threshold,
         "questions_file": str(args.questions), "n_chunks": len(index), "dry_run": args.dry_run,
+        "stopped_early": stopped,
     }
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / f"{name}.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
     (args.out_dir / f"{name}.json").write_text(json.dumps({"config": config, "summary": summary}, indent=2, ensure_ascii=False), encoding="utf-8")
     report = markdown_report(name, config, summary, rows)
     (args.out_dir / f"{name}.md").write_text(report, encoding="utf-8")
     print()
     print(report.split("## Per question")[0].rstrip())
-    print(f"\nwritten: {args.out_dir / name}.{{jsonl,json,md}}")
-    return EXIT_OK
+    print(f"\nwritten: {args.out_dir / name}.{{jsonl,json,md}}", flush=True)
+    return EXIT_OK if stopped is None else 3
 
 
 if __name__ == "__main__":

@@ -138,7 +138,8 @@ def main(argv: list[str] | None = None, *, provider: LLMProvider | None = None, 
 
     if record.weak_retrieval:
         best = None if record.best_dense_score is None else round(record.best_dense_score, 3)
-        print(f"note: retrieval was weak (best dense score {best}); the answer may not be in the documents.")
+        print(f"note: retrieval was weak (best dense score {best}, best BM25 score {record.best_bm25_score:.1f}); "
+              "the answer may not be in the documents.")
     print_sources(record)
     if record.truncated:
         print("note: the answer was cut off by the max_tokens limit", file=sys.stderr)

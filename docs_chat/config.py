@@ -56,15 +56,19 @@ class Settings:
         default_factory=lambda: _env("E5_MODEL_NAME", "intfloat/multilingual-e5-small")
     )
     # --- chunking ---------------------------------------------------------
-    chunk_words: int = field(default_factory=lambda: int(_env("CHUNK_WORDS", "250")))
+    # 350 words (≈500 tokens) chosen on the eval set (M4): hit@6 0.97 vs 0.92 at 250 words, same hit@3
+    chunk_words: int = field(default_factory=lambda: int(_env("CHUNK_WORDS", "350")))
     chunk_overlap_words: int = field(default_factory=lambda: int(_env("CHUNK_OVERLAP_WORDS", "50")))
     # --- retrieval --------------------------------------------------------
     top_k: int = field(default_factory=lambda: int(_env("TOP_K", "6")))
     candidates: int = field(default_factory=lambda: int(_env("CANDIDATES", "20")))
     rrf_k: int = field(default_factory=lambda: int(_env("RRF_K", "60")))
-    weak_retrieval_threshold: float = field(
-        default_factory=lambda: float(_env("WEAK_RETRIEVAL_THRESHOLD", "0.75"))
-    )
+    # Weak-retrieval signal (M4, see docs/DESIGN.md). Dense cosine threshold: 0 = off, because e5-small scores
+    # of answerable and unanswerable questions overlap almost entirely (balanced accuracy 0.67 at best).
+    weak_retrieval_threshold: float = field(default_factory=lambda: float(_env("WEAK_RETRIEVAL_THRESHOLD", "0")))
+    # BM25 rule: weak if 0 < best BM25 score < threshold (0 = off). A best score of exactly 0 means the query
+    # shares no words with the documents (e.g. a Turkish question on English documents) and is never flagged.
+    weak_bm25_threshold: float = field(default_factory=lambda: float(_env("WEAK_BM25_THRESHOLD", "15")))
     # --- limits (protect the public demo) ----------------------------------
     max_files: int = field(default_factory=lambda: int(_env("MAX_FILES", "10")))
     max_file_mb: int = field(default_factory=lambda: int(_env("MAX_FILE_MB", "20")))

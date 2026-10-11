@@ -62,7 +62,8 @@ def drain(gen):
 
 
 def make_settings(**overrides) -> Settings:
-    return Settings(**{"embedder": "hash", **overrides})
+    # the dense weak flag is on here (off by default since M4) so the weak-note path stays under test
+    return Settings(**{"embedder": "hash", "weak_retrieval_threshold": 0.9, **overrides})
 
 
 @pytest.fixture
@@ -139,7 +140,7 @@ def test_ask_streams_deltas_and_returns_a_record(indexed_session, guard, embedde
     (source,) = record.sources
     assert source.n == 1 and source.doc_name.endswith(".pdf") and source.where.startswith("p.") and source.text
     assert record.cost == "free tier" and record.cost_usd == 0.0 and record.latency_seconds >= 0
-    assert record.weak_retrieval is True and record.best_dense_score is not None  # hash scores sit far below 0.75
+    assert record.weak_retrieval is True and record.best_dense_score is not None  # hash scores sit far below 0.9
     assert record.n_passages == 6 and record.model == "llama-x" and record.truncated is False
     # the provider saw the system prompt, the numbered passages, the question and the weak note
     (call,) = provider.calls
@@ -243,7 +244,7 @@ def test_answer_is_the_non_streaming_twin_of_ask(indexed_session, embedder):
     assert record.n_passages == len(record.passages) == 6 and record.sources[0] == record.passages[0]
     assert all(p.n == i for i, p in enumerate(record.passages, start=1))
     assert (record.input_tokens, record.output_tokens) == (1500, 40) and record.cost == "free tier"
-    assert record.weak_retrieval is True  # hash scores are far below the threshold
+    assert record.weak_retrieval is True and record.best_bm25_score > 0  # hash scores are far below 0.9
     assert indexed_session.question_count == 0  # no session involvement
     with pytest.raises(ValueError, match="retrieval mode"):
         service.answer(indexed_session.index, QUESTION, [], "m", FakeProvider(), embedder=embedder, mode="bogus")

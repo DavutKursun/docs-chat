@@ -118,6 +118,7 @@ class AnswerRecord:
     n_passages: int
     model: str
     truncated: bool  # the answer hit the max_tokens limit
+    best_bm25_score: float = 0.0
     passages: list[Source] = field(default_factory=list)  # every retrieved passage in rank order (eval: hit@k)
     input_tokens: int = 0
     output_tokens: int = 0
@@ -171,6 +172,7 @@ def _record(
         passages=passages,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
+        best_bm25_score=retrieval.best_bm25_score,
     )
 
 

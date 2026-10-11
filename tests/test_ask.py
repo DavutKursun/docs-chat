@@ -80,7 +80,8 @@ def base_args(index_dir: Path, model: str) -> list[str]:
     ("provider_name", "model", "expected_cost"),
     [("openai_compat", "llama-3.3-70b-versatile", "free tier"), ("anthropic", "claude-haiku-5-5", "$0.0005")],
 )
-def test_ask_end_to_end_with_mocked_provider(ask, index_dir, guard, capsys, provider_name, model, expected_cost):
+def test_ask_end_to_end_with_mocked_provider(ask, index_dir, guard, capsys, monkeypatch, provider_name, model, expected_cost):
+    monkeypatch.setattr(ask, "settings", Settings(weak_retrieval_threshold=0.9))  # dense flag on: exercise the note
     provider = FakeProvider(provider_name)
     assert ask.main(base_args(index_dir, model), provider=provider, guard=guard) == 0
     out = capsys.readouterr().out
@@ -89,7 +90,7 @@ def test_ask_end_to_end_with_mocked_provider(ask, index_dir, guard, capsys, prov
     # loading is reported first and is not part of the answer latency
     assert re.match(r"loaded index \(\d+ chunks\) \+ embedder hash-256 in \d+\.\d s$", lines[0])
     # the answer was streamed to stdout, after a note that the hash embedder's scores are below the threshold
-    assert "note: retrieval was weak" in out
+    assert re.search(r"note: retrieval was weak \(best dense score 0\.\d+, best BM25 score \d+\.\d\)", out)
     assert ANSWER in out
 
     # cited passages: [1] exists, [9] does not; preview = doc, page, first 200 characters

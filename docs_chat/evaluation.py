@@ -6,7 +6,8 @@
 * ``summarize`` — hit@3/6, correctness, abstention accuracy, invalid-citation rate, cost and latency percentiles
 * ``markdown_report`` — the summary as a markdown table plus a per-question table
 * ``MockProvider`` — a deterministic provider for ``--dry-run`` and tests (answers from the eval set itself)
-* ``call_with_retry`` / ``is_rate_limited`` — retry with backoff on HTTP 429 (Groq free tier)
+* ``call_with_retry`` / ``is_rate_limited`` / ``is_quota_exhausted`` — retry with backoff on HTTP 429, but
+  give up at once on a daily quota (Groq free tier)
 """
 
 from __future__ import annotations
@@ -221,6 +222,12 @@ def is_rate_limited(exc: BaseException) -> bool:
     return getattr(exc, "status_code", None) == 429 or "429" in text or "rate limit" in text or "rate_limit" in text
 
 
+def is_quota_exhausted(exc: BaseException) -> bool:
+    """A rate limit that will not clear within minutes (daily token/request quota): stop instead of retrying."""
+    text = str(exc).lower()
+    return is_rate_limited(exc) and any(marker in text for marker in ("per day", "tpd", "rpd", "daily"))
+
+
 T = TypeVar("T")
 BACKOFF_S = (15, 30, 60, 60)
 
@@ -231,7 +238,7 @@ def call_with_retry(fn: Callable[[], T], retries: int = 4, sleep: Callable[[floa
         try:
             return fn()
         except ProviderError as exc:
-            if attempt >= retries or not is_rate_limited(exc):
+            if attempt >= retries or not is_rate_limited(exc) or is_quota_exhausted(exc):
                 raise
             sleep(BACKOFF_S[min(attempt, len(BACKOFF_S) - 1)])
     raise AssertionError("unreachable")
