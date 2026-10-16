@@ -74,11 +74,29 @@ Dense-only, 250-word chunks, top-6, 2026-10-10 (`eval/results/dense-openai-gpt-o
 | Cost per answer | free tier (2,158 input + 158 output tokens on average) |
 | Latency p50 / p95 | 14.2 s / 17.0 s — Groq queueing at a 2.5 s pace; isolated calls take 0.5–1.4 s |
 
-Hybrid and the dense rerun with the tuned defaults (350-word chunks, BM25 weak flag) are pending the
-daily token window; see "How to reproduce". Of the 7 answers judged partial or wrong, 5 are omissions
-of a secondary detail (two-blocks rule, 5 learning days, two-weeks notice, parking and tolls) and 2 are
-retrieval misses (q20, q41) where the gold page was not among the six passages, so the model answered
-from a neighbouring section.
+Of the 7 dense answers judged partial or wrong, 5 are omissions of a secondary detail (two-blocks rule,
+5 learning days, two-weeks notice, parking and tolls) and 2 are retrieval misses (q20, q41) where the
+gold page was not among the six passages, so the model answered from a neighbouring section.
+
+Hybrid, 350-word chunks (the tuned defaults), top-6, 2026-10-16, paced at 12 s between calls
+(`eval/results/hybrid-openai-gpt-oss-120b.md`):
+
+| Metric | Value |
+|---|---|
+| Retrieval hit@3 | 0.84 |
+| Retrieval hit@6 | 0.97 (only q13 misses) |
+| Judge: correct / partial / wrong | 32 / 6 / 0 |
+| Correct + partial | 1.00 |
+| Abstention accuracy (14 unanswerable) | 1.00 |
+| False abstentions (answerable) | 0.00 |
+| Answers citing the gold page | 35 of 38 (0.92); 0 invalid citations |
+| Weak-retrieval flags | 9 of 52, all on unanswerable questions, none on answerable |
+| Cost per answer | free tier (2,409 input + 157 output tokens on average; 133k tokens for the run) |
+| Latency p50 / p95 | 1.1 s / 3.1 s |
+
+All six partial verdicts are omissions of a secondary detail (q02, q06, q10, q13, q34, q37). The two runs
+are not a clean A/B: the dense run used 250-word chunks, the hybrid run the tuned 350-word index; the dense
+rerun with the tuned defaults is pending the daily token window.
 
 ### Retrieval sweep (hybrid, no LLM calls)
 
@@ -115,10 +133,24 @@ unanswerable cases, which is a useful hint for the model rather than a detector.
 
 ### Judge spot check
 
-Ten judgments were hand-checked (q01, q06, q10, q19, q20, q34, q37, q41, q44, q49; `hand_check` column in
-the dense results JSONL): 9 agree with the judge, 1 disagrees — q44, judged wrong, is partial (the reset
-procedure is correct; only the filter-indicator exception is missing). Nine were pre-filled by the
-assistant for Davut's review; q44 is Davut's call.
+Ten dense-run judgments were hand-checked by Davut Kursun (q01, q06, q10, q19, q20, q34, q37, q41, q44,
+q49; `hand_check` columns in the dense results JSONL): 6 of 10 agree with the judge. The judge marked q06,
+q34 and q37 partial for omitting details the question did not ask for (the two-blocks rule, the notice
+period, parking and tolls), and mis-judged the Turkish q44 as wrong although the answer matches the
+expected one. The two real failures, q20 and q41, are retrieval misses: the gold page was not among the
+passages. q19 is right but cites a non-existent passage ([7]), which the citation filter dropped. So the
+self-grading judge is strict rather than lenient on this set, and "correct + partial" is the fairer
+headline than "correct" alone.
+
+### Latency under free-tier limits
+
+Two hybrid runs on the same day show what the latency numbers mean. Paced at 12 s between calls (under
+Groq's 8,000 tokens per minute), the 52-question run had a median of 1.1 s and p95 of 3.1 s per answer. An
+unpaced 10-question run (`eval/results/hybrid-timing-10q.*`) took 0.9–1.8 s for the first three answers
+and then 7–22 s (median 7.0 s): once the per-minute token budget is spent, Groq queues requests instead
+of rejecting them. The paced figure is the model's latency and what a single user of the demo sees; the
+unpaced one is the free tier under burst load. The unpaced run also stopped at its ninth question on the
+200,000 tokens-per-day quota, which the full run had nearly used up.
 
 ### How to reproduce
 
@@ -147,10 +179,10 @@ run stops cleanly when the provider reports its daily quota.
 
 ### Open items
 
-- Hybrid run and the dense rerun with the tuned defaults (daily token window).
+- Dense rerun with the tuned defaults (daily token window), for a clean dense-vs-hybrid comparison.
 - Reranker configuration (`BAAI/bge-reranker-v2-m3`) and the Haiku vs Sonnet comparison from the spec
   need an Anthropic key and a free CPU budget; not run yet.
-- Latency should be re-measured at the slower pace; the 14 s median is a queueing artefact.
+- The dense run's 14 s median latency is a queueing artefact of its 2.5 s pace (see the latency note).
 
 ## Known limitations
 
