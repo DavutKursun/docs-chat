@@ -78,3 +78,12 @@ def test_format_cost_labels_free_tier_and_estimates():
     assert format_cost(0.00042) == "$0.0004"
     assert format_cost(0.00042, estimated=True) == "$0.0004 (est.)"
     assert format_cost(0.00001) == "<$0.0001"
+
+
+def test_budget_guard_daily_call_cap(tmp_path: Path):
+    guard = BudgetGuard(tmp_path / "budget.json", max_daily_usd=100.0, max_daily_calls=3)
+    assert guard.remaining_calls() == 3 and guard.can_spend()
+    for _ in range(3):
+        guard.record(0.0)  # free-tier answers cost nothing but still count
+    assert guard.remaining_calls() == 0 and guard.calls_exhausted() and not guard.can_spend()
+    assert BudgetGuard(tmp_path / "other.json", max_daily_usd=1.0).remaining_calls() is None  # no call cap

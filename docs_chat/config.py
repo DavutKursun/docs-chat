@@ -6,6 +6,7 @@ Every knob of the app lives here so that the README can document it in one table
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,7 +31,18 @@ def _load_dotenv(path: Path = Path(".env")) -> None:
         os.environ.setdefault(key, value)
 
 
-_load_dotenv()
+def on_space() -> bool:
+    """True on Hugging Face Spaces (they set SPACE_ID): secrets come from the environment, never from .env."""
+    return bool(os.environ.get("SPACE_ID"))
+
+
+if not on_space():
+    _load_dotenv()  # local development only
+
+
+def _demo(space_default: str, local_default: str) -> str:
+    """Public-demo limits on a Space, roomier ones locally; an explicit env var always wins."""
+    return space_default if on_space() else local_default
 
 
 def _env(name: str, default: str) -> str:
@@ -70,13 +82,16 @@ class Settings:
     # shares no words with the documents (e.g. a Turkish question on English documents) and is never flagged.
     weak_bm25_threshold: float = field(default_factory=lambda: float(_env("WEAK_BM25_THRESHOLD", "15")))
     # --- limits (protect the public demo) ----------------------------------
-    max_files: int = field(default_factory=lambda: int(_env("MAX_FILES", "10")))
-    max_file_mb: int = field(default_factory=lambda: int(_env("MAX_FILE_MB", "20")))
-    max_total_pages: int = field(default_factory=lambda: int(_env("MAX_TOTAL_PAGES", "300")))
+    # on a Space (SPACE_ID set) the public-demo limits apply: 3 files, 10 MB each, 60 pages
+    max_files: int = field(default_factory=lambda: int(_env("MAX_FILES", _demo("3", "10"))))
+    max_file_mb: int = field(default_factory=lambda: int(_env("MAX_FILE_MB", _demo("10", "20"))))
+    max_total_pages: int = field(default_factory=lambda: int(_env("MAX_TOTAL_PAGES", _demo("60", "300"))))
     max_questions_per_session: int = field(
         default_factory=lambda: int(_env("MAX_QUESTIONS_PER_SESSION", "20"))
     )
     max_daily_usd: float = field(default_factory=lambda: float(_env("MAX_DAILY_USD", "2")))
+    # answers per day for the whole deployment, shared across users (free-tier demo); resets at 00:00 UTC
+    max_daily_answers: int = field(default_factory=lambda: int(_env("MAX_DAILY_ANSWERS", "150")))
     budget_file: Path = field(default_factory=lambda: Path(_env("BUDGET_FILE", ".budget.json")))
     session_ttl_hours: float = field(default_factory=lambda: float(_env("SESSION_TTL_HOURS", "2")))
     # --- paths --------------------------------------------------------------
@@ -84,6 +99,13 @@ class Settings:
         default_factory=lambda: Path(_env("SAMPLE_DOCS_DIR", "eval/sample_docs"))
     )
     sessions_dir: Path = field(default_factory=lambda: Path(_env("SESSIONS_DIR", "sessions")))  # per-session uploads + index
+    # the sample documents' index is built at start-up and cached here (/tmp on Linux; not persistent on a Space)
+    sample_index_dir: Path = field(
+        default_factory=lambda: Path(_env("SAMPLE_INDEX_DIR", str(Path(tempfile.gettempdir()) / "docs-chat" / "sample-index")))
+    )
+    # DOCS_CHAT_FAKE_PROVIDER=1: canned answers from the eval set instead of an LLM (headless smoke tests only)
+    fake_provider: bool = field(default_factory=lambda: _env("DOCS_CHAT_FAKE_PROVIDER", "0").lower() in ("1", "true", "yes"))
+    on_space: bool = field(default_factory=on_space)
 
     def __post_init__(self) -> None:
         if not self.llm_model and self.llm_provider == "anthropic":

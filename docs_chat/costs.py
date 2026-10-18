@@ -65,11 +65,18 @@ class Spend:
 
 
 class BudgetGuard:
-    """Tracks today's spend in a small JSON file; refuses calls past the daily cap."""
+    """Tracks today's spend and call count in a small JSON file; refuses calls past either daily cap.
 
-    def __init__(self, path: str | Path, max_daily_usd: float, clock=time.time) -> None:
+    ``max_daily_calls`` caps the number of answers per UTC day for the whole deployment (free-tier
+    demos record $0 per call, so the dollar cap alone would never trip); None = no call cap.
+    """
+
+    def __init__(
+        self, path: str | Path, max_daily_usd: float, max_daily_calls: int | None = None, clock=time.time
+    ) -> None:
         self.path = Path(path)
         self.max_daily_usd = max_daily_usd
+        self.max_daily_calls = max_daily_calls
         self._clock = clock
 
     def _today(self) -> str:
@@ -94,10 +101,19 @@ class BudgetGuard:
         os.replace(tmp, self.path)
 
     def can_spend(self, estimated_usd: float = 0.0) -> bool:
-        return self.read().usd + estimated_usd <= self.max_daily_usd
+        spend = self.read()
+        if self.max_daily_calls is not None and spend.calls >= self.max_daily_calls:
+            return False
+        return spend.usd + estimated_usd <= self.max_daily_usd
+
+    def calls_exhausted(self) -> bool:
+        return self.max_daily_calls is not None and self.read().calls >= self.max_daily_calls
 
     def remaining_usd(self) -> float:
         return max(self.max_daily_usd - self.read().usd, 0.0)
+
+    def remaining_calls(self) -> int | None:
+        return None if self.max_daily_calls is None else max(self.max_daily_calls - self.read().calls, 0)
 
     def record(self, usd: float) -> Spend:
         spend = self.read()

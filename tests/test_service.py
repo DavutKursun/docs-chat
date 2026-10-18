@@ -248,3 +248,33 @@ def test_answer_is_the_non_streaming_twin_of_ask(indexed_session, embedder):
     assert indexed_session.question_count == 0  # no session involvement
     with pytest.raises(ValueError, match="retrieval mode"):
         service.answer(indexed_session.index, QUESTION, [], "m", FakeProvider(), embedder=embedder, mode="bogus")
+
+
+def test_preflight_message_when_the_daily_answers_are_used_up(tmp_path):
+    guard = BudgetGuard(tmp_path / "b.json", max_daily_usd=5.0, max_daily_calls=2)
+    guard.record(0.0)
+    guard.record(0.0)
+    with pytest.raises(service.BudgetExceeded, match="answered its 2 questions for today"):
+        service.preflight("m", FakeProvider(), guard)
+
+
+def test_sample_index_is_built_once_and_then_loaded_from_the_cache(tmp_path, embedder):
+    cfg = make_settings()
+    cache = tmp_path / "sample-index"
+    index, built = service.load_or_build_sample_index(cfg, embedder=embedder, cache_dir=cache)
+    assert built is True and len(index) > 0 and (cache / "fingerprint.json").exists()
+    again, built_again = service.load_or_build_sample_index(cfg, embedder=embedder, cache_dir=cache)
+    assert built_again is False and len(again) == len(index) and again.documents == index.documents
+    # a different chunking invalidates the cache
+    _, rebuilt = service.load_or_build_sample_index(make_settings(chunk_words=150), embedder=embedder, cache_dir=cache)
+    assert rebuilt is True
+
+
+def test_attach_samples_gives_a_session_the_shared_index(store, embedder, tmp_path):
+    index, _ = service.load_or_build_sample_index(make_settings(), embedder=embedder, cache_dir=tmp_path / "c")
+    session = store.create()
+    service.attach_samples(session, index)
+    assert session.index is index and session.uploaded_files() == [] and set(session.documents) == set(index.documents)
+    record = drain(service.ask(session, QUESTION, [], "m", FakeProvider(), guard=BudgetGuard(tmp_path / "b.json", 1.0),
+                                embedder=embedder))[1]
+    assert record.n_passages == 6 and record.retrieval == "hybrid"

@@ -1,0 +1,15 @@
+# Runtime for the Hugging Face Space (Gradio SDK, free CPU, 2 vCPU / 16 GB).
+# The Space installs `requirements.txt` from the repo root, so copy this file there as
+# requirements.txt when pushing to the Space. Pinned where versions matter; CPU-only torch.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.4,<3
+sentence-transformers>=3.0,<7
+faiss-cpu>=1.8
+rank_bm25>=0.2.2
+numpy>=1.26
+pydantic>=2.6
+pypdf>=4.2
+python-docx>=1.1
+openai>=1.50,<4
+anthropic>=0.50
+gradio==6.30.0

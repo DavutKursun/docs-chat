@@ -18,3 +18,4 @@ venv/
 *.gif.tmp
 # session scratch files (never commit)
 scratchpad/
+smoke_app.log

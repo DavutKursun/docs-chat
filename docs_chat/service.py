@@ -21,6 +21,7 @@ the API call fails. ``scripts/ask.py``, ``scripts/eval.py`` and ``app.py`` all g
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -32,7 +33,9 @@ from .config import Settings
 from .config import settings as default_settings
 from .costs import BudgetGuard, cost_usd, format_cost
 from .embeddings import Embedder, get_embedder
+from .chunking import chunk_pages
 from .index import DocIndex, Hit
+from .loaders import SUPPORTED_SUFFIXES, load_folder
 from .llm import MAX_TOKENS, SYSTEM_PROMPT, answer_stream, build_messages, parse_citations
 from .providers import LLMProvider, LLMResult
 from .retriever import RetrievalResult, retrieve
@@ -122,10 +125,12 @@ class AnswerRecord:
     passages: list[Source] = field(default_factory=list)  # every retrieved passage in rank order (eval: hit@k)
     input_tokens: int = 0
     output_tokens: int = 0
+    retrieval: str = "hybrid"  # retrieval mode used for this answer
 
 
 def budget_guard(cfg: Settings = default_settings) -> BudgetGuard:
-    return BudgetGuard(cfg.budget_file, cfg.max_daily_usd)
+    """The shared daily guard: a dollar cap and an answers-per-day cap (free tiers record $0 per answer)."""
+    return BudgetGuard(cfg.budget_file, cfg.max_daily_usd, cfg.max_daily_answers)
 
 
 def preflight(model: str, provider: LLMProvider, guard: BudgetGuard) -> None:
@@ -138,6 +143,11 @@ def preflight(model: str, provider: LLMProvider, guard: BudgetGuard) -> None:
         raise ValueError(str(exc.args[0])) from None
     if not guard.can_spend():
         spend = guard.read()
+        if guard.calls_exhausted():
+            raise BudgetExceeded(
+                f"The demo has answered its {guard.max_daily_calls} questions for today and resets at 00:00 UTC. "
+                "Uploading documents and retrieval still work; come back tomorrow for answers."
+            )
         raise BudgetExceeded(
             f"Demo budget reached for today: ${spend.usd:.4f} spent in {spend.calls} call(s), "
             f"cap ${guard.max_daily_usd:.2f}. Not calling the API."
@@ -149,7 +159,7 @@ def _source(n: int, hit: Hit) -> Source:
 
 
 def _record(
-    result: LLMResult, retrieval: RetrievalResult, model: str, provider: LLMProvider, latency: float
+    result: LLMResult, retrieval: RetrievalResult, model: str, provider: LLMProvider, latency: float, mode: str
 ) -> AnswerRecord:
     """Price the call and turn the LLM result + retrieval into an AnswerRecord (shared by ask() and answer())."""
     hits = retrieval.hits
@@ -173,6 +183,7 @@ def _record(
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
         best_bm25_score=retrieval.best_bm25_score,
+        retrieval=mode,
     )
 
 
@@ -186,6 +197,7 @@ def ask(
     guard: BudgetGuard | None = None,
     embedder: Embedder | None = None,
     cfg: Settings | None = None,
+    mode: str = "hybrid",
 ) -> Generator[str, None, AnswerRecord]:
     """Yield the answer as it streams; the generator's return value is the AnswerRecord.
 
@@ -204,13 +216,13 @@ def ask(
     embedder = embedder or shared_embedder(cfg)
 
     t0 = time.perf_counter()
-    retrieval = retrieve(session.index, question, embedder, cfg)
+    retrieval = retrieve(session.index, question, embedder, cfg, mode=mode)
     messages = build_messages(history, retrieval.hits, question, weak_retrieval=retrieval.weak)
     session.next_question()  # LimitExceeded once max_questions_per_session is reached
     result = yield from answer_stream(provider, messages, model)
     latency = time.perf_counter() - t0
 
-    record = _record(result, retrieval, model, provider, latency)
+    record = _record(result, retrieval, model, provider, latency, mode)
     guard.record(record.cost_usd)  # free-tier calls record $0 but still count
     log.info(
         "answer: %d passages, %d in / %d out tokens%s, %.1f s, cost %s, %d source(s), %d invalid citation(s)%s",
@@ -245,4 +257,57 @@ def answer(
     retrieval = retrieve(index, question, embedder, cfg, mode=mode)
     messages = build_messages(history, retrieval.hits, question, weak_retrieval=retrieval.weak)
     result = provider.complete(messages, SYSTEM_PROMPT, model, max_tokens)
-    return _record(result, retrieval, model, provider, time.perf_counter() - t0)
+    return _record(result, retrieval, model, provider, time.perf_counter() - t0, mode)
+
+
+# ------------------------------------------------------------------- sample documents
+def sample_fingerprint(folder: Path, cfg: Settings, embedder_name: str) -> dict:
+    """What the cached sample index depends on: the files (name, size, mtime), the embedder and the chunking."""
+    files = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES)
+    return {
+        "files": [[p.name, p.stat().st_size, int(p.stat().st_mtime)] for p in files],
+        "embedder": embedder_name,
+        "chunk_words": cfg.chunk_words,
+        "overlap_words": cfg.chunk_overlap_words,
+    }
+
+
+def load_or_build_sample_index(
+    cfg: Settings = default_settings,
+    embedder: Embedder | None = None,
+    folder: str | Path | None = None,
+    cache_dir: str | Path | None = None,
+) -> tuple[DocIndex, bool]:
+    """The sample documents' index, from the cache when nothing changed, else built and cached.
+
+    Returns ``(index, built)``. The cache lives under ``cfg.sample_index_dir`` (/tmp on a Space, which is not
+    persistent on the free tier, so the index is simply rebuilt at the next start) and is invalidated by
+    ``sample_fingerprint``.
+    """
+    folder = Path(folder or cfg.sample_docs_dir)
+    cache_dir = Path(cache_dir or cfg.sample_index_dir)
+    emb = embedder or shared_embedder(cfg)
+    fingerprint = sample_fingerprint(folder, cfg, emb.name)
+    marker = cache_dir / "fingerprint.json"
+    if marker.exists() and (cache_dir / "meta.json").exists():
+        try:
+            if json.loads(marker.read_text(encoding="utf-8")) == fingerprint:
+                return DocIndex.load(cache_dir), False
+        except (OSError, ValueError, KeyError):
+            log.warning("sample index cache unreadable, rebuilding")
+    t0 = time.perf_counter()
+    pages, warnings = load_folder(folder)
+    for warning in warnings:
+        log.warning("sample documents: %s", warning)
+    index = DocIndex.build(chunk_pages(pages, chunk_words=cfg.chunk_words, overlap_words=cfg.chunk_overlap_words), emb)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    index.save(cache_dir)
+    marker.write_text(json.dumps(fingerprint), encoding="utf-8")
+    log.info("sample index built: %d page(s), %d chunk(s) in %.1f s -> %s", len(pages), len(index), time.perf_counter() - t0, cache_dir)
+    return index, True
+
+
+def attach_samples(session: Session, index: DocIndex) -> None:
+    """Point a session at the shared sample index (no files are copied); earlier uploads are removed."""
+    session.clear_uploads()
+    session.index = index
