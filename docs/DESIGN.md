@@ -60,7 +60,7 @@ query ─► "query: " embedding ─► dense top-20 ─┐
 
 ### Results
 
-Dense-only, 250-word chunks, top-6, 2026-10-10 (`eval/results/dense-openai-gpt-oss-120b.md`):
+Dense-only, 250-word chunks, top-6, 2026-10-10 (`eval/results/dense-openai-gpt-oss-120b-chunk250.md`):
 
 | Metric | Value |
 |---|---|
@@ -94,9 +94,28 @@ Hybrid, 350-word chunks (the tuned defaults), top-6, 2026-10-16, paced at 12 s b
 | Cost per answer | free tier (2,409 input + 157 output tokens on average; 133k tokens for the run) |
 | Latency p50 / p95 | 1.1 s / 3.1 s |
 
-All six partial verdicts are omissions of a secondary detail (q02, q06, q10, q13, q34, q37). The two runs
-are not a clean A/B: the dense run used 250-word chunks, the hybrid run the tuned 350-word index; the dense
-rerun with the tuned defaults is pending the daily token window.
+All six partial verdicts are omissions of a secondary detail (q02, q06, q10, q13, q34, q37).
+
+Dense-only on the same 350-word index, 2026-10-19 (`eval/results/dense-openai-gpt-oss-120b.md`):
+
+| Metric | Value |
+|---|---|
+| Retrieval hit@3 | 0.84 |
+| Retrieval hit@6 | 0.95 (misses q13, q41) |
+| Judge: correct / partial / wrong | 32 / 5 / 1 |
+| Correct + partial | 0.97 |
+| Abstention accuracy (14 unanswerable) | 1.00 |
+| Answers citing the gold page | 34 of 38 (0.89); 0 invalid citations |
+| Weak-retrieval flags | 9 of 52, all on unanswerable questions |
+| Latency p50 / p95 | 0.9 s / 1.3 s |
+
+**Dense vs hybrid on the same index.** Identical "correct" counts (32 of 38) and identical abstention;
+hybrid is ahead on hit@6 (0.97 vs 0.95), correct + partial (1.00 vs 0.97) and gold-page citations (0.92 vs
+0.89). The difference is one question, q41: the BM25 leg catches the exact words "child lock" and "timer
+button" that dense ranks too low, so dense answers from the accessibility section instead and is graded
+wrong. Hybrid pays a little at p95 latency (3.1 s vs 1.3 s, driven by one 7.3 s answer). Hybrid stays the
+default; on this corpus the two are close because the questions were written to be answerable from one
+passage, and the exact-token questions (error codes, part numbers) are where hybrid earns its keep.
 
 ### Retrieval sweep (hybrid, no LLM calls)
 
@@ -134,13 +153,40 @@ unanswerable cases, which is a useful hint for the model rather than a detector.
 ### Judge spot check
 
 Ten dense-run judgments were hand-checked by Davut Kursun (q01, q06, q10, q19, q20, q34, q37, q41, q44,
-q49; `hand_check` columns in the dense results JSONL): 6 of 10 agree with the judge. The judge marked q06,
+q49; `hand_check` columns in `eval/results/dense-openai-gpt-oss-120b-chunk250.jsonl`): 6 of 10 agree with the judge. The judge marked q06,
 q34 and q37 partial for omitting details the question did not ask for (the two-blocks rule, the notice
 period, parking and tolls), and mis-judged the Turkish q44 as wrong although the answer matches the
 expected one. The two real failures, q20 and q41, are retrieval misses: the gold page was not among the
 passages. q19 is right but cites a non-existent passage ([7]), which the citation filter dropped. So the
 self-grading judge is strict rather than lenient on this set, and "correct + partial" is the fairer
 headline than "correct" alone.
+
+### Three failures, read closely
+
+- **q20 "How loud is the device in sleep mode?" (dense, 250-word chunks: wrong).** The gold page (manual
+  p.2, "22 dB in sleep mode") was not among the six passages; the Sleep-mode section on p.6 was, so the
+  model answered "barely audible from a distance of two metres" with a correct citation to the wrong
+  page. A retrieval miss that reads like a confident answer. Fixed by 350-word chunks (hybrid run: correct).
+- **q41 "How do I enable the child lock?" (dense, 250-word chunks: wrong).** Same pattern: the gold page
+  (p.5, "hold the timer button for 3 seconds") was missed and the accessibility section (p.12) was
+  retrieved, so the model described the remote-control route, which is true but not the answer. Also
+  correct with 350-word chunks.
+- **q13 "Yeni başlayan çalışanlar için deneme süresi ne kadar?" (every configuration: gold page missed).**
+  A Turkish question on an English document: BM25 finds nothing (best score 0) and the dense ranking
+  puts the onboarding section ("the 90-day check-in doubles as the probation review") above the
+  probation paragraph on p.1. The model inferred "90 gün" from it, which the judge accepted as the
+  right length (partial: the one-week notice is missing). Cross-lingual retrieval is the weakest spot of
+  the system and the reason the BM25 weak flag deliberately stays silent at a score of 0.
+
+### Judge strictness
+
+With gpt-oss-120b grading its own answers, the worry was leniency. The hand check found the opposite:
+of the ten judgments, the four disagreements were all cases where the judge was stricter than a human
+reader (three "partial" verdicts for leaving out a detail the question had not asked for, and one
+Turkish answer marked wrong although it matches the expected answer). No wrong answer was graded
+correct. The rubric's "partial: right but materially incomplete" is applied to any omission from the
+reference answer, so "correct + partial" is the headline figure to compare configurations by, and
+"correct" alone understates the system.
 
 ### Latency under free-tier limits
 
@@ -179,10 +225,9 @@ run stops cleanly when the provider reports its daily quota.
 
 ### Open items
 
-- Dense rerun with the tuned defaults (daily token window), for a clean dense-vs-hybrid comparison.
 - Reranker configuration (`BAAI/bge-reranker-v2-m3`) and the Haiku vs Sonnet comparison from the spec
   need an Anthropic key and a free CPU budget; not run yet.
-- The dense run's 14 s median latency is a queueing artefact of its 2.5 s pace (see the latency note).
+- The 250-word dense run's 14 s median latency is a queueing artefact of its 2.5 s pace (see the latency note).
 
 ## Known limitations
 

@@ -4,11 +4,11 @@ This file is the build spec. Read it fully before writing code. Work milestone b
 milestone; after each milestone stop, show how to run it, and wait for Davut's OK.
 Section 0 says where we are.
 
-## 0. Status (updated 2026-10-10)
+## 0. Status (updated 2026-10-19)
 
-**Milestones 1, 2 and 3 are done and tested. Start at Milestone 4.**
+**Milestones 1 to 4 are done and tested. Start at Milestone 5.**
 
-Implemented and covered by `pytest` (113 tests; no network, no API key; the 4 UI tests are skipped where
+Implemented and covered by `pytest` (131 tests; no network, no API key; the 4 UI tests are skipped where
 Gradio is not installed, everything else needs neither an SDK nor torch):
 
 M1 — ingest and index:
@@ -17,8 +17,10 @@ M1 — ingest and index:
 - `docs_chat/chunking.py` — ≈250-word chunks, 50-word overlap, never cross pages, sentence/word fallback for huge paragraphs
 - `docs_chat/embeddings.py` — `E5Embedder` (multilingual-e5-small, prefixes, normalised, lazy with an eager `load()`) and `HashEmbedder` (offline toy embedder for tests)
 - `docs_chat/index.py` — FAISS `IndexFlatIP` + BM25Plus, save/load, `rrf_fuse`, `hybrid_search`. It imports torch before faiss and sets `KMP_DUPLICATE_LIB_OK`: faiss-cpu and torch each bundle an OpenMP runtime, and on macOS the other order segfaults while the duplicate-runtime check aborts at the first search.
-- `docs_chat/retriever.py` — `retrieve()` with the weak-retrieval flag (threshold is a placeholder until M4)
-- `scripts/ingest.py`; `eval/sample_docs/` — two original PDFs (fictional handbook + manual, MIT) and `eval/questions.jsonl` (24 answerable + 8 unanswerable, pages verified)
+- `docs_chat/retriever.py` — `retrieve()` (mode `hybrid` or `dense`) with the weak-retrieval flag: BM25 rule
+  `0 < best BM25 < WEAK_BM25_THRESHOLD` (15); a best score of 0 (cross-lingual question) is never flagged; the
+  dense threshold is kept but off (M4)
+- `scripts/ingest.py`; `eval/sample_docs/` — two original PDFs (fictional handbook 16 pages + manual 15 pages, MIT)
 
 M2 — retrieval and answering (CLI):
 - `docs_chat/providers.py` — `LLMProvider` protocol: `stream()` yields text deltas and `complete()` is non-streaming; both return an `LLMResult` (text, input/output/cache tokens, model, latency, `usage_estimated`, `stop_reason`). `OpenAICompatProvider`: the `openai` SDK against `LLM_BASE_URL` (Groq, OpenRouter, Mistral, Gemini's OpenAI endpoint), streaming with `stream_options.include_usage`, retried without it when an endpoint rejects it (422), Groq's `x_groq` usage read, tokens estimated and flagged when no usage arrives. `AnthropicProvider`: `client.messages.stream(...)`, system prompt in `system`, usage from the final message (cache tokens included in the total). SDK failures (auth, unknown model, rate limit, connection) become `ProviderError` with a one-line message; SDKs are imported lazily.
@@ -26,7 +28,6 @@ M2 — retrieval and answering (CLI):
 - `docs_chat/costs.py` — Anthropic price table, `cost_usd(..., provider=)` (a model missing from the table on `openai_compat` is a free tier = $0), `format_cost()` → "free tier" / "<$0.0001" / "$0.0004 (est.)", `BudgetGuard`
 - `scripts/ask.py` — load index + embedder (timed on its own line) → retrieve → streamed answer → cited passages (doc, page, 200 chars) → `invalid citations dropped: N` → `cost … · s · N passages`. The budget guard is checked before the call and every call is recorded (free tier records $0). Exit codes: 2 provider/model not configured or unpriced on a paid provider, 3 daily budget reached, 4 API error. `--retrieval-only` needs no key.
 - `.env.example` — Groq first (`openai/gpt-oss-120b` was the model on 2026-10-10; Groq retires model names), other OpenAI-compatible endpoints, Anthropic as the alternative
-- `scripts/eval.py` — retrieval hit rate only until M4
 - CI (`.github/workflows/ci.yml`), `Makefile`, `requirements*.txt`, `LICENSE`
 
 M3 — web app:
@@ -51,19 +52,41 @@ M3 — web app:
   clear session). Measured through the Gradio client on Groq's free tier: sample index 0.5–0.9 s, first token
   0.2–1.4 s, answers 1.2–2.3 s; the embedder loads in ~9 s at start-up.
 
-Verified against real services on 2026-10-10 (Groq free tier, `openai/gpt-oss-120b`, e5 embedder): q01, q02, q15, q16 answered correctly with citations on the gold pages; q27 abstained with the exact sentence. e5 ingest of the sample docs: 93 s cold (model download), 10 s warm (model loading dominates; 9 chunks embed in under a second).
+M4 — evaluation:
+- `eval/questions.jsonl` — 52 questions: 38 answerable with doc, page and an evidence string that occurs on exactly
+  that page (`scripts/check_questions.py`, `--fix` moves page numbers; `tests/test_eval_set.py` runs the check), 14
+  unanswerable, 6 in Turkish on the English documents.
+- `scripts/eval.py` + `docs_chat/evaluation.py` — `--retrieval dense|hybrid`, `--provider/--model`, judge model and
+  provider (default: the answering model), `--limit`, `--dry-run` with a `MockProvider`; metrics hit@3/6, LLM judge
+  (correct / partial / wrong + one-sentence reason), abstention accuracy (exact sentence), invalid citations, cost
+  mean/p50, latency p50/p95; results in `eval/results/<config>.{jsonl,json,md}`, rows appended as they come;
+  `--delay` between calls, retry with backoff on 429, clean stop on a daily quota. Runs through `service.answer()`,
+  the non-streaming twin of `ask()`.
+- Tuned on the eval set: `CHUNK_WORDS=350` (hit@6 0.97 vs 0.92 at 250), `TOP_K=6` (top-8 adds nothing), weak
+  retrieval = BM25 rule (the dense score does not separate answerable from unanswerable questions).
+- Results with `openai/gpt-oss-120b` on Groq's free tier as answerer and judge, same 350-word index: hybrid hit@6
+  0.97, correct 0.84 / correct+partial 1.00, abstention 1.00, 0.92 of answers cite the gold page, p50 1.1 s; dense
+  hit@6 0.95, 0.84 / 0.97, 1.00, 0.89, p50 0.9 s. Hand check of 10 judgments: 6 agree, the judge is strict rather
+  than lenient. Acceptance criteria met (hit@6 ≥ 0.85, abstention ≥ 0.75, correct+partial ≥ 0.80, median latency
+  under 6 s when calls are paced). Not run: the reranker configuration and Haiku vs Sonnet (need an Anthropic
+  key). `docs/DESIGN.md` has the sweep, the weak-signal analysis, three failure examples, the judge-strictness
+  finding, the latency note and the reproduce commands; the README has the results table.
+
+Verified against real services on 2026-10-10 (Groq free tier, `openai/gpt-oss-120b`, e5 embedder): q01, q02, q15, q16 answered correctly with citations on the gold pages; q27 abstained with the exact sentence. e5 ingest of the sample docs: 93 s cold (model download), 10 s warm (model loading dominates).
 
 Notes for the next milestones:
-- M4: build the eval on `service`/`provider.complete()` so it runs the same path as the app; the judge needs a
-  second provider/model.
-- M4: e5-small cosine scores sit in a narrow 0.72–0.86 band on the sample docs (q01 best 0.855 on the gold chunk; unanswerable q27 still 0.800), so the 0.75 placeholder flags nothing. Tune the weak-retrieval threshold on the answerable vs unanswerable score distributions (or combine with BM25), not on a single raw cutoff. Groq free-tier latency varied 0.5–12 s per call; gpt-oss-120b spends ~70–110 reasoning tokens per answer (returned by Groq in a separate field, not in the text); prompts were ≈1.9k tokens, completions 100–145. `provider.complete()` exists for the judge.
+- Groq free tier limits for the eval: 8,000 tokens per minute and 200,000 tokens per day per model; a 52-question
+  run costs ~140k tokens, so one configuration per day with `--delay 12`. Unpaced bursts are queued by Groq
+  (7–22 s per answer), which is why latency must be measured paced.
+- gpt-oss-120b spends ~70–110 reasoning tokens per answer (returned by Groq in a separate field, not in the text);
+  prompts are ≈2.4k tokens with 350-word chunks, completions ≈160 tokens.
 - Keep `requirements-core.txt` free of torch, the SDKs and Gradio so CI stays fast; tests must keep using
   `HashEmbedder` and fake providers, and UI tests skip without Gradio.
-- `scripts/eval.py` already computes retrieval hit rate; extend it in M4 rather than rewriting it.
 - M5: on Linux `pip install torch` pulls the CUDA build; use the CPU wheel index (`--extra-index-url https://download.pytorch.org/whl/cpu`) on the Space.
   Set `HF_HUB_OFFLINE=1` once the model is cached: sentence-transformers makes ~10 hub requests when loading
   it (about 5 s of the 9 s start-up) and would fail without network. Gradio takes the next free port when 7860
-  is busy; Spaces set `GRADIO_SERVER_NAME` themselves. The README has placeholders for the GIF and a screenshot.
+  is busy; Spaces set `GRADIO_SERVER_NAME` themselves. The README has placeholders for the GIF and a screenshot,
+  and the acceptance criterion "median latency under 6 s on the Space" must be re-measured there.
 
 ## 1. Goal
 
@@ -163,9 +186,9 @@ docs-chat/
 almost no text (scanned PDF), mark it and skip with a warning in the UI (OCR is out
 of scope; say so in the README). Normalize whitespace.
 
-**Chunk.** Split page text by paragraphs, then merge/split into chunks of ~350 tokens
-(use a simple word-count proxy, ~250 words) with ~50-word overlap. Never cross page
-boundaries. Each chunk keeps `doc_name`, `page_no`, `chunk_id`, and a short
+**Chunk.** Split page text by paragraphs, then merge/split into chunks of ~350 words
+(≈500 tokens; `CHUNK_WORDS`, tuned on the eval set in M4: hit@6 0.97 vs 0.92 at 250 words)
+with ~50-word overlap. Never cross page boundaries. Each chunk keeps `doc_name`, `page_no`, `chunk_id`, and a short
 `section_hint` (first line of the chunk) for display.
 
 **Index.** Embed chunks (normalized vectors, inner-product FAISS `IndexFlatIP`) and
@@ -173,9 +196,13 @@ build a BM25 index over tokenized chunk text. Save both plus chunk metadata to t
 session directory (pickle/npz) so re-asking does not re-embed.
 
 **Retrieve.** For a question: dense top-20 and BM25 top-20, fused with reciprocal rank
-fusion (k=60), keep top-k=6. If a reranker is enabled, rerank the fused top-20 and
-keep 6. Include a minimum-score sanity check: if the best dense score is below a
-threshold (tune on the eval set), tell the LLM that retrieval was weak.
+fusion (k=60), keep top-k=6 (`TOP_K`; top-8 adds nothing at 350-word chunks). If a reranker
+is enabled, rerank the fused top-20 and keep 6. Weak-retrieval check (M4): tell the LLM that
+retrieval was weak when `0 < best BM25 score < WEAK_BM25_THRESHOLD` (15). A best BM25 score
+of 0 means the question shares no word with the documents, the normal case for a Turkish
+question on English documents, and is never flagged. The dense-score threshold
+(`WEAK_RETRIEVAL_THRESHOLD`) is kept but off (0): e5-small scores of answerable and
+unanswerable questions overlap almost entirely (see docs/DESIGN.md).
 
 **Answer.** System prompt (keep in `llm.py`, versioned):
 - You answer questions using only the numbered passages provided.

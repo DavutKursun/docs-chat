@@ -19,13 +19,22 @@ Companies keep their rules in PDFs nobody reads: employee handbooks, product man
 
 ## Results
 
-| Metric | Value | How measured |
+52 questions (38 answerable, 14 unanswerable, 6 in Turkish) over two fictional documents of 31 pages;
+`openai/gpt-oss-120b` on Groq's free tier as answerer and judge; 350-word chunks, top-6, the same index
+for both runs (`scripts/eval.py`, full tables and failure analysis in [docs/DESIGN.md](docs/DESIGN.md)):
+
+| Metric | Hybrid (default) | Dense only |
 |---|---|---|
-| Retrieval hit rate@6 | _M4_ | 24 answerable questions over the sample docs, `scripts/eval.py` |
-| Answer correctness (judge) | _M4_ | 3-level rubric, Sonnet as judge, spot-checked by hand |
-| Abstention accuracy | _M4_ | 8 unanswerable questions |
-| Cost per answer (Haiku 5.5) | _M4_ | measured from API usage |
-| Latency | _M4_ | median, free CPU Space |
+| Judge: correct / correct + partial | 0.84 / 1.00 | 0.84 / 0.97 |
+| Abstention accuracy (14 unanswerable) | 1.00 | 1.00 |
+| Retrieval hit@6 | 0.97 | 0.95 |
+| Answers citing the gold page | 0.92 | 0.89 |
+| Latency p50 / p95 (paced under the free-tier limit) | 1.1 s / 3.1 s | 0.9 s / 1.3 s |
+| Cost per answer | free tier | free tier |
+
+Hand check of 10 judgments: 6 agree with the judge; the 4 disagreements are the judge being stricter than a
+human reader (three "partial" verdicts for details the question did not ask for, one Turkish answer marked wrong
+although it matches the reference). No wrong answer was graded correct.
 
 What does not work yet: scanned PDFs (no OCR), very large corpora (> 300 pages), persistent storage across sessions.
 
