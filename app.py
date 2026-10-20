@@ -1,5 +1,11 @@
 """docs-chat — the Gradio UI. Entry point for Hugging Face Spaces: ``python app.py`` serves on port 7860.
 
+Served the standard Gradio way (``demo.launch()`` on ``GRADIO_SERVER_NAME``/``GRADIO_SERVER_PORT``), which is
+what the Spaces runtime expects; the ``/health`` route is added to Gradio's own FastAPI app after launch.
+Server-side rendering is off: Spaces set ``GRADIO_SSR_MODE=true``, which puts a Node front proxy on the public
+port that only forwards Gradio's own paths to Python and answers everything else (``/health`` included) with
+the rendered page.
+
 Layout (CLAUDE.md §6): left column — file upload, "Build index" with progress, the indexed
 documents (name, pages), the model dropdown, "Clear and use samples", "Clear session"; right
 column — a chat with streaming answers; under each answer the cited passages as "doc p.N" chips,
@@ -358,17 +364,9 @@ def build_ui() -> gr.Blocks:
     return demo
 
 
-def build_server(demo: gr.Blocks):
-    """A FastAPI app with ``/health`` and the Gradio UI mounted at ``/``."""
-    from fastapi import FastAPI
-
-    api = FastAPI(title=TITLE)
-
-    @api.get("/health")
-    def health() -> dict:
-        return health_payload()
-
-    return gr.mount_gradio_app(api, demo, path="/")
+def add_health_route(fastapi_app) -> None:
+    """``GET /health`` on Gradio's FastAPI app (``demo.app`` once launched): JSON for monitoring."""
+    fastapi_app.add_api_route("/health", lambda: health_payload(), methods=["GET"], include_in_schema=False)
 
 
 def start_cleanup_timer(interval_s: float = CLEANUP_INTERVAL_S) -> threading.Thread:
@@ -386,8 +384,6 @@ def start_cleanup_timer(interval_s: float = CLEANUP_INTERVAL_S) -> threading.Thr
 
 
 def main() -> None:
-    import uvicorn
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     log.info(
         "space=%s provider=%s model=%r embedder=%s key_configured=%s limits=%s/%s MB/%s pages, %s answers/day",
@@ -402,11 +398,18 @@ def main() -> None:
     start_cleanup_timer()
     demo = build_ui()
     demo.queue(default_concurrency_limit=4)
-    server = build_server(demo)
-    host = os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1")
-    port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
-    log.info("serving on http://%s:%d (health: /health)", host, port)
-    uvicorn.run(server, host=host, port=port, log_level="warning")
+    port_env = os.environ.get("GRADIO_SERVER_PORT")  # 7860 on a Space; locally Gradio picks the next free port
+    demo.launch(
+        server_name=os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1"),
+        server_port=int(port_env) if port_env else None,
+        prevent_thread_lock=True,
+        show_error=False,
+        quiet=True,
+        ssr_mode=False,  # keep uvicorn on the public port so /health is reachable (see the module docstring)
+    )
+    add_health_route(demo.app)
+    log.info("serving on %s (health: /health)", demo.local_url)
+    demo.block_thread()
 
 
 if __name__ == "__main__":

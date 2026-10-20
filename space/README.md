@@ -18,6 +18,7 @@ the retrieved passages and cites the document and page; when the answer is not i
 app says so instead of guessing. Two sample documents (a fictional employee handbook and a product
 manual) are loaded when the page opens, so you can ask straight away, for example
 *"How many days of annual leave do employees get?"* or *"What does error code E3 mean?"*
+Both sample documents are original, fictional and MIT-licensed.
 
 How it works: hybrid retrieval (multilingual-e5-small embeddings in FAISS + BM25, fused with
 reciprocal rank fusion), a strict system prompt, citation checking, and an evaluation on 52

@@ -72,5 +72,6 @@ def test_build_ui_smoke_without_launching():
         assert kind in kinds
     assert {d.get("api_name") for d in config["dependencies"]} >= {"load", "build_index", "use_samples", "ask", "clear"}
     assert config["title"] == app.TITLE
-    server = app.build_server(demo)
-    assert any(getattr(r, "path", "") == "/health" for r in server.routes)
+    fastapi_app = gr.routes.App.create_app(demo)  # what launch() builds; /health is added to it
+    app.add_health_route(fastapi_app)
+    assert any(getattr(r, "path", "") == "/health" for r in fastapi_app.routes)
