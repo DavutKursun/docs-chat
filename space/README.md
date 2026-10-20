@@ -38,13 +38,16 @@ Secrets (Settings → Variables and secrets):
 | `LLM_MODEL` | model id, e.g. `openai/gpt-oss-120b` (Groq retires model names; check their list) |
 | `LLM_BASE_URL` | `https://api.groq.com/openai/v1` (variable, not secret) |
 | `LLM_PROVIDER` | `openai_compat` (default) or `anthropic` with `ANTHROPIC_API_KEY` |
+| `SAMPLE_DOCS_DIR` | `sample_docs` (variable): the two sample PDFs ship in that folder of the Space |
+| `MAX_DAILY_ANSWERS` | `38` (variable): 150 answers would need ~385k tokens/day; 38 keeps the demo within half of Groq's 200k tokens/day for the model, leaving the rest for local runs |
 
 Without a key the app starts and shows a "demo key not configured" banner; uploads and retrieval
 still work, answers are disabled.
 
 Limits on the Space (set automatically when `SPACE_ID` is present; override with variables):
 3 files per session, 10 MB each, 60 pages in total, 20 questions per session, and
-`MAX_DAILY_ANSWERS` (150) answers per day for the whole Space, resetting at 00:00 UTC.
+`MAX_DAILY_ANSWERS` answers per day for the whole Space (38 on this deployment, about 2,600 tokens
+per answer against a 200k tokens/day quota shared with other uses of the key), resetting at 00:00 UTC.
 
 Privacy: uploaded files and their index live in a per-session temporary directory and are deleted
 when the session is cleared or after 2 hours; no document text is logged. `/health` reports the
