@@ -8,7 +8,7 @@ sdk_version: 6.30.0
 app_file: app.py
 pinned: false
 license: mit
-short_description: Ask questions about your documents; answers cite document and page
+short_description: Ask your documents; every answer cites document and page
 ---
 
 # docs-chat
