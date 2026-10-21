@@ -4,11 +4,17 @@ This file is the build spec. Read it fully before writing code. Work milestone b
 milestone; after each milestone stop, show how to run it, and wait for Davut's OK.
 Section 0 says where we are.
 
-## 0. Status (updated 2026-10-19)
+## 0. Status (updated 2026-10-21)
 
-**Milestones 1 to 4 are done and tested. Start at Milestone 5.**
+**Project complete: Milestones 1 to 5 are done, tested and deployed.** Live demo:
+https://huggingface.co/spaces/DavutKursun/docs-chat · code: https://github.com/DavutKursun/docs-chat.
+Manual-only items left for Davut: the eval configurations that need an Anthropic key (Haiku vs Sonnet, the
+reranker) were not run; Groq retires model names, so when `openai/gpt-oss-120b` disappears change `LLM_MODEL`
+on the Space and in `.env.example` and redo the quota maths behind `MAX_DAILY_ANSWERS`; the secret
+`LLM_API_KEY` lives only in the Space settings; look at `docs/img/demo.gif` once in a browser after UI changes
+(`scripts/demo_gif.py` re-records it).
 
-Implemented and covered by `pytest` (131 tests; no network, no API key; the 4 UI tests are skipped where
+Implemented and covered by `pytest` (138 tests; no network, no API key; the 4 UI tests are skipped where
 Gradio is not installed, everything else needs neither an SDK nor torch):
 
 M1 — ingest and index:
@@ -42,9 +48,9 @@ M3 — web app:
   string, latency, weak flag, …), `preflight()` (model configured, priced, budget) and `BudgetExceeded`.
 - `app.py` — Gradio 6 Blocks UI as in §6: left column upload / Build index (`gr.Progress`) / documents table /
   model dropdown (the configured provider's model first; Claude models only when `ANTHROPIC_API_KEY` is set) /
-  Clear session; right column chatbot streaming via `service.ask`, under each answer a collapsible `<details>`
-  Sources block, a grey "cost · latency · N passages" line and a weak-retrieval note; header with "Try the
-  sample documents". Session id in `gr.State`; every error becomes a `gr.Warning`. Two rendering details:
+  Clear and use samples / Clear session (M5); right column chatbot streaming via `service.ask`, under each
+  answer `[n]` chips, a collapsible `<details>` Sources block, a grey "cost · latency · N passages" line and a
+  weak-retrieval note; the sample documents are loaded when the page opens (M5). Session id in `gr.State`; every error becomes a `gr.Warning`. Two rendering details:
   passage text in the Sources block is collapsed to one line (a blank line inside an HTML block ends it in
   Markdown and breaks the box), and the assistant bubble shows a "…" placeholder while the model reasons
   before its first token. API endpoints: `build_index`, `build_sample`, `ask`, `clear`.
@@ -74,7 +80,28 @@ M4 — evaluation:
 
 Verified against real services on 2026-10-10 (Groq free tier, `openai/gpt-oss-120b`, e5 embedder): q01, q02, q15, q16 answered correctly with citations on the gold pages; q27 abstained with the exact sentence. e5 ingest of the sample docs: 93 s cold (model download), 10 s warm (model loading dominates).
 
-Notes for the next milestones:
+M5 — ship:
+- Space `DavutKursun/docs-chat` (public, cpu-basic), created and updated only through the Hub API
+  (`HfApi.upload_folder`, one commit per deploy, never `git push`). Space tree: `app.py`, `docs_chat/`,
+  `eval/sample_docs/*.pdf` as `sample_docs/` (no `.md` file there: it would be indexed), `space/README.md` as
+  `README.md`, `requirements-space.txt` as `requirements.txt`. Variables: `LLM_BASE_URL`, `LLM_MODEL`,
+  `SAMPLE_DOCS_DIR=sample_docs`, `MAX_DAILY_ANSWERS=38` (≈2.5k tokens per answer, half of Groq's 200k
+  tokens/day); the secret `LLM_API_KEY` is set in the Space settings.
+- `app.py` serves the standard Gradio way (`demo.launch()`), adds `/health` to Gradio's FastAPI app after
+  launch and passes `ssr_mode=False`: Spaces set `GRADIO_SSR_MODE=true`, whose Node front proxy forwards only
+  Gradio's own paths to Python and answers `/health` with the page; running uvicorn yourself on 7860 fails
+  there with "address already in use".
+- Measured on the Space (2026-10-21): start-up 21 s in the container (embedder 12 s including the model
+  download, which happens on every cold start; sample index 7 s), ≈50 s from cold start to RUNNING. 12 eval
+  questions through the Gradio API 12 s apart: model latency p50 0.9 s / p95 4.9 s, 1.7 s / 5.5 s end to end;
+  10/10 answerable questions cited a passage, 9/10 the gold page (the Turkish probation question cited the
+  90-day check-in on p.10 instead of p.1, same fact); 2/2 exact abstentions; ≈2.5k tokens per answer. The
+  p95 is Groq queueing: another visitor used the demo during the run and Groq answered 429 twice (8k
+  tokens/minute); the UI shows a 429 as a warning under the question and the answer does not count.
+- `scripts/demo_gif.py` (Playwright + Pillow in a throwaway venv, not in the requirements) records
+  `docs/img/demo.gif` from the live Space (27 frames, 18 s, 0.3 MB); README per the template; CI green.
+
+Notes for maintenance:
 - Groq free tier limits for the eval: 8,000 tokens per minute and 200,000 tokens per day per model; a 52-question
   run costs ~140k tokens, so one configuration per day with `--delay 12`. Unpaced bursts are queued by Groq
   (7–22 s per answer), which is why latency must be measured paced.
@@ -82,11 +109,11 @@ Notes for the next milestones:
   prompts are ≈2.4k tokens with 350-word chunks, completions ≈160 tokens.
 - Keep `requirements-core.txt` free of torch, the SDKs and Gradio so CI stays fast; tests must keep using
   `HashEmbedder` and fake providers, and UI tests skip without Gradio.
-- M5: on Linux `pip install torch` pulls the CUDA build; use the CPU wheel index (`--extra-index-url https://download.pytorch.org/whl/cpu`) on the Space.
-  Set `HF_HUB_OFFLINE=1` once the model is cached: sentence-transformers makes ~10 hub requests when loading
-  it (about 5 s of the 9 s start-up) and would fail without network. Gradio takes the next free port when 7860
-  is busy; Spaces set `GRADIO_SERVER_NAME` themselves. The README has placeholders for the GIF and a screenshot,
-  and the acceptance criterion "median latency under 6 s on the Space" must be re-measured there.
+- On Linux `pip install torch` pulls the CUDA build; `requirements-space.txt` uses the CPU wheel index
+  (`--extra-index-url https://download.pytorch.org/whl/cpu`). `HF_HUB_OFFLINE=1` works locally once the model
+  is cached (sentence-transformers makes ~10 hub requests when loading it, about 5 s) but not on the Space,
+  which has no persistent cache and downloads the model on every start. Gradio takes the next free port when
+  7860 is busy; Spaces set `GRADIO_SERVER_NAME`/`GRADIO_SERVER_PORT` themselves.
 
 ## 1. Goal
 
@@ -226,14 +253,17 @@ not in the price table on an OpenAI-compatible provider costs $0.00 and is shown
 
 ## 6. UI (Gradio)
 
-Left column: file upload (multiple; limits: 10 files, 20 MB each, 300 pages total),
-"Build index" button with progress, list of indexed documents with page counts,
-model dropdown (Haiku default / Sonnet), "Clear session".
-Right column: chat window with streaming answers; under each answer an accordion
-"Sources" with the cited passages (doc, page, text); a grey line
-"cost $0.0004 · 2.1 s · 6 passages".
-Header: one sentence what the app is + "Try it: load sample documents" button that
-loads `eval/sample_docs` so visitors can test without uploading anything.
+Left column: file upload (multiple; limits on the public Space: 3 files, 10 MB each, 60 pages total;
+locally 10 files, 20 MB each, 300 pages), "Build index" button with progress, list of indexed documents
+with page counts, model dropdown (the configured provider's model first; Claude models only when
+`ANTHROPIC_API_KEY` is set), "Clear and use samples" (replaces the session's documents with
+`eval/sample_docs`, which are also loaded when the page opens, so visitors can ask without uploading
+anything), "Clear session".
+Right column: chat window with streaming answers; under each answer `[n]` citation chips (document,
+page), a collapsible "Show the cited passages" block (doc, page, text) and a grey line
+"hybrid · cost free tier · 2.1 s · 6 passages".
+Header: one sentence what the app is, the "Demo key not configured" banner when no key is set, and a
+status line (model, retrieval mode, answers left today).
 
 ## 7. Evaluation (this is what makes the project credible)
 
